@@ -2,7 +2,11 @@ name: Build APK
 
 on:
   push:
+    branches: [main, master]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -13,20 +17,34 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
+      - name: Android SDK 준비 (서버에 기본 설치된 것 사용)
+        run: |
+          SDKM=$(ls -d $ANDROID_HOME/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-34" "build-tools;34.0.0" "platform-tools" > /dev/null || echo "SDK 설치 경고 - Gradle이 자동 설치 시도"
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
       - name: 프로젝트 위치 찾기
-        run: echo "PROJ=$(dirname "$(find . -name settings.gradle.kts | head -1)")" >> $GITHUB_ENV
+        run: echo "PROJ=$(dirname "$(find . -name settings.gradle.kts -not -path './.git/*' | head -1)")" >> $GITHUB_ENV
       - name: 단위 테스트
         run: cd "$PROJ" && gradle testDebugUnitTest --no-daemon
       - name: APK 빌드
-        run: cd "$PROJ" && gradle assembleRelease --no-daemon
+        run: cd "$PROJ" && gradle assembleRelease -PversionCode=${{ github.run_number }} --no-daemon
+      - name: APK 이름 정리
+        run: cp "$PROJ"/app/build/outputs/apk/release/*.apk worklife-${{ github.run_number }}.apk
+      - name: 릴리즈 만들기
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: 1.0.${{ github.run_number }}
+          body: ${{ github.event.head_commit.message || '수동 빌드' }}
+          files: worklife-${{ github.run_number }}.apk
+          make_latest: true
       - uses: actions/upload-artifact@v4
         with:
           name: worklife-apk
-          path: "**/app/build/outputs/apk/release/*.apk"
+          path: worklife-${{ github.run_number }}.apk
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
