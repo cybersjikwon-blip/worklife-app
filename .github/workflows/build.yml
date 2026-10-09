@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: write   # 릴리즈 생성용
 
 jobs:
   build:
@@ -17,23 +17,35 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - name: Android SDK 준비 (서버에 기본 설치된 것 사용)
+      - name: Android SDK 준비
         run: |
           SDKM=$(ls -d $ANDROID_HOME/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)
           yes | "$SDKM" --licenses > /dev/null || true
-          "$SDKM" "platforms;android-34" "build-tools;34.0.0" "platform-tools" > /dev/null || echo "SDK 설치 경고 - Gradle이 자동 설치 시도"
-      - uses: gradle/actions/setup-gradle@v4
+          "$SDKM" "platforms;android-34" "build-tools;34.0.0" "platform-tools" > /dev/null || true
+      - uses: gradle/actions/setup-gradle@v4   # Gradle·의존성 캐시
         with:
           gradle-version: "8.9"
-      - name: 프로젝트 위치 찾기
+      - name: 프로젝트 위치 찾기 (폴더째 올려도 동작)
         run: echo "PROJ=$(dirname "$(find . -name settings.gradle.kts -not -path './.git/*' | head -1)")" >> $GITHUB_ENV
+      - name: APK 빌드 (실패 시 에러를 요약에 표시)
+        run: |
+          cd "$PROJ"
+          set -o pipefail
+          if ! gradle assembleRelease -PversionCode=${{ github.run_number }} --no-daemon 2>&1 | tee build.log; then
+            { echo "## ❌ 빌드 에러"; echo '```'; grep -E "^e: |error:|What went wrong" -A4 build.log | head -100; echo '```'; } >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
       - name: 단위 테스트
-        run: cd "$PROJ" && gradle testDebugUnitTest --no-daemon
-      - name: APK 빌드
-        run: cd "$PROJ" && gradle assembleRelease -PversionCode=${{ github.run_number }} --no-daemon
+        run: |
+          cd "$PROJ"
+          set -o pipefail
+          if ! gradle testDebugUnitTest --no-daemon 2>&1 | tee test.log; then
+            { echo "## ❌ 테스트 실패"; echo '```'; grep -E "FAILED|AssertionError|^e: " -A3 test.log | head -100; echo '```'; } >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
       - name: APK 이름 정리
         run: cp "$PROJ"/app/build/outputs/apk/release/*.apk worklife-${{ github.run_number }}.apk
-      - name: 릴리즈 만들기
+      - name: 릴리즈 만들기 (앱이 이걸 보고 업데이트)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.${{ github.run_number }}
