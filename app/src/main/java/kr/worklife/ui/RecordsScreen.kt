@@ -98,6 +98,7 @@ private fun DayRow(c: Company, r: DayRecord, today: LocalDate, onClick: () -> Un
                     r.status == Status.ABSENT -> Tag("결근", MaterialTheme.colorScheme.error)
                     r.status == Status.LEAVE -> Tag("연차", OkGreen)
                     r.status != Status.HOLIDAY && !r.day.isAfter(today) -> Tag(r.source.label, MaterialTheme.colorScheme.primary)
+                    else -> {}
                 }
             }
         }

@@ -110,10 +110,16 @@ fun MonthNav(ym: YearMonth, onChange: (YearMonth) -> Unit) {
 @Composable
 fun Field(label: String, value: String, onChange: (String) -> Unit, number: Boolean = false,
           hint: String? = null, modifier: Modifier = Modifier.fillMaxWidth()) {
-    val sup: (@Composable () -> Unit)? = if (hint == null) null else @Composable { Text(hint) }
-    OutlinedTextField(value, onChange, label = { Text(label) }, singleLine = true, modifier = modifier.padding(vertical = 4.dp),
-        supportingText = sup,
-        keyboardOptions = KeyboardOptions(keyboardType = if (number) KeyboardType.Decimal else KeyboardType.Text))
+    val kb = KeyboardOptions(keyboardType = if (number) KeyboardType.Decimal else KeyboardType.Text)
+    val m = modifier.padding(vertical = 4.dp)
+    // 안내문구 유무를 별도 호출로 분리 (nullable 컴포저블 람다 타입 추론 문제 회피)
+    if (hint == null) {
+        OutlinedTextField(value = value, onValueChange = onChange, label = { Text(label) }, singleLine = true,
+            modifier = m, keyboardOptions = kb)
+    } else {
+        OutlinedTextField(value = value, onValueChange = onChange, label = { Text(label) }, singleLine = true,
+            modifier = m, keyboardOptions = kb, supportingText = { Text(hint) })
+    }
 }
 
 @Composable
