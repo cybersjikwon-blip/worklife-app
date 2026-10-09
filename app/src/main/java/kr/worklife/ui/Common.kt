@@ -101,7 +101,7 @@ fun MonthNav(ym: YearMonth, onChange: (YearMonth) -> Unit) {
         IconButton(onClick = { onChange(ym.minusMonths(1)) }) { Icon(Icons.Filled.KeyboardArrowLeft, "이전 달") }
         Text("${ym.year}년 ${ym.monthValue}월", fontSize = 19.sp, fontWeight = FontWeight.SemiBold,
             modifier = Modifier.clickable { onChange(YearMonth.now()) }.padding(horizontal = 12.dp))
-        IconButton(onClick = { onChange(ym.plusMonths(1)) }, enabled = ym.isBefore(YearMonth.now())) {
+        IconButton(onClick = { onChange(ym.plusMonths(1)) }, enabled = ym.isBefore(YearMonth.now().plusMonths(1))) {
             Icon(Icons.Filled.KeyboardArrowRight, "다음 달")
         }
     }
@@ -135,3 +135,11 @@ fun pickTime(ctx: Context, init: LocalTime, cb: (LocalTime) -> Unit) =
 
 fun pickDate(ctx: Context, init: LocalDate, cb: (LocalDate) -> Unit) =
     DatePickerDialog(ctx, { _, y, m, d -> cb(LocalDate.of(y, m + 1, d)) }, init.year, init.monthValue - 1, init.dayOfMonth).show()
+
+/** 급여 산정기간 안내 줄: "10월분 · 9/21~10/20 · 급여일 10/23(금)" */
+@Composable
+fun PeriodLine(p: kr.worklife.core.PayPeriod) {
+    Text("${p.label.monthValue}월분 · ${p.rangeText()} · 급여일 ${p.payDate.monthValue}/${p.payDate.dayOfMonth}(${wd(p.payDate)})",
+        fontSize = 13.sp, color = MaterialTheme.colorScheme.onBackground.copy(alpha = .6f),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+}

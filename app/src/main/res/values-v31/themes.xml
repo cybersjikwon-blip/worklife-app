@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 12+ 시스템 스플래시를 앱 로딩 화면과 같은 파란색으로 → 끊김 없이 이어짐 -->
+    <style name="Theme.WorkLife" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowSplashScreenBackground">@color/ic_bg</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_fg</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/ic_bg</item>
+    </style>
+</resources>

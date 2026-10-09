@@ -36,7 +36,8 @@ object Engine {
         val repo = Repo.get(ctx)
         val (_, g, c) = evaluate(ctx, d)
         if (g == null || c == null) return null
-        if (!HolidayCalendar(c).isWorkday(d) && g.firstInside == null) return null
+        // 휴일엔 자동 기록하지 않음 (회사 반경 안이어도) → 홈에서 '휴일근무로 기록' 제안만
+        if (!HolidayCalendar(c).isWorkday(d)) return null
         val existing = repo.day(d, c.id)
         if (existing != null && existing.source == Source.MANUAL) return existing
         val co = g.checkout ?: run {
@@ -49,6 +50,18 @@ object Engine {
         return rec
     }
 
+    /** 오늘이 급여일이면 아침 알림 (자정 마감 알람에서 호출) */
+    fun paydayNotice(ctx: Context, today: LocalDate = LocalDate.now()) {
+        val repo = Repo.get(ctx)
+        for (c in repo.companies) {
+            val np = nextPayday(c, today)
+            if (np.payDate != today) continue
+            val p = calcPayroll(c, repo.settings, np, buildPeriod(c, np, repo.period(np, c.id), today), today)
+            Notif.post(ctx, 30 + c.id.toInt(), "오늘은 ${c.name} 급여일이에요",
+                "${np.label.monthValue}월분(${np.rangeText()}) 예상 실수령 ${"%,d".format(p.net)}원")
+        }
+    }
+
     /** 지난 날 중 확정 기록 없이 위치만 있는 날 자동 마감 */
     fun settlePast(ctx: Context, today: LocalDate = LocalDate.now()) {
         val repo = Repo.get(ctx)
@@ -58,7 +71,7 @@ object Engine {
             if (repo.day(d, c.id) != null) continue
             val (_, g, _) = evaluate(ctx, d)
             if (g == null) continue
-            if (!HolidayCalendar(c).isWorkday(d) && g.firstInside == null) continue
+            if (!HolidayCalendar(c).isWorkday(d)) continue
             val (co, src) = g.finalize()
             repo.saveDay(toRecord(c, d, g, co, src))
         }

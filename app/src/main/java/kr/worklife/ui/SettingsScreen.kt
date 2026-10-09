@@ -98,6 +98,17 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
     var xh by remember { mutableStateOf(c.extraHolidays.sorted().joinToString(", ")) }
     var xw by remember { mutableStateOf(c.extraWorkdays.sorted().joinToString(", ")) }
     var locating by remember { mutableStateOf(false) }
+    var pStart by remember { mutableStateOf(c.periodStartDay.toString()) }
+    var payDay by remember { mutableStateOf(if (c.payDay <= 0) "" else c.payDay.toString()) }
+    var payLast by remember { mutableStateOf(c.payDay <= 0) }
+    var payOff by remember { mutableStateOf(c.payMonthOffset) }
+    var payAdj by remember { mutableStateOf(c.payAdjust) }
+    var prorate by remember { mutableStateOf(c.prorateBy) }
+    var bonusPartial by remember { mutableStateOf(c.bonusOnPartial) }
+    var leaveAuto by remember { mutableStateOf(c.annualLeaveDays < 0) }
+    var leaveDays by remember { mutableStateOf(if (c.annualLeaveDays < 0) "15" else c.annualLeaveDays.toString()) }
+    var leaveBasis by remember { mutableStateOf(c.leaveBasis) }
+    var carry by remember { mutableStateOf(if (c.leaveCarryover == 0.0) "" else days(c.leaveCarryover).removeSuffix("일")) }
 
     SCard {
         CardTitle("회사", trailing = { if (c.endDate == null) Tag("현재 회사", OkGreen) })
@@ -155,6 +166,51 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
         Field("연장 인정 단위(분)", unit, { unit = it }, number = true, hint = "30 → 15:29 퇴근은 0분, 15:30은 30분")
         Field("만근수당(원)", bonus, { bonus = it }, number = true)
 
+        Text("급여 산정기간 · 급여일", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
+        Field("산정기간 시작일 (1~28)", pStart, { pStart = it.filter { ch -> ch.isDigit() }.take(2) }, number = true,
+            hint = "1 → 매월 1일~말일 · 21 → 전월 21일~당월 20일")
+        SwitchRow("급여일이 말일", payLast) { payLast = it }
+        if (!payLast) Field("급여일 (매월 n일)", payDay, { payDay = it.filter { ch -> ch.isDigit() }.take(2) }, number = true)
+        Text("지급하는 달", fontSize = 14.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FilterChip(payOff == 0, { payOff = 0 }, label = { Text("기간 끝난 달") })
+            FilterChip(payOff == 1, { payOff = 1 }, label = { Text("다음 달") })
+        }
+        Text("급여일이 휴일이면", fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf("before" to "앞당김", "after" to "미룸", "none" to "그대로").forEach { (k, v) ->
+                FilterChip(payAdj == k, { payAdj = k }, label = { Text(v) })
+            }
+        }
+        // 미리보기: 입력값으로 이번 기간 계산
+        val preview = runCatching {
+            val tmp = c.copy(periodStartDay = pStart.toIntOrNull()?.coerceIn(1, 28) ?: 1,
+                payDay = if (payLast) 0 else payDay.toIntOrNull()?.coerceIn(1, 31) ?: 10, payMonthOffset = payOff, payAdjust = payAdj)
+            val pr = periodContaining(tmp, LocalDate.now())
+            "이번 기간: ${pr.label.monthValue}월분 ${pr.rangeText()} → 급여일 ${pr.payDate.monthValue}/${pr.payDate.dayOfMonth}(${wd(pr.payDate)})"
+        }.getOrDefault("")
+        Text(preview, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 6.dp))
+
+        Text("중도 입사·퇴사", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
+        Text("기본급 일할 계산 기준", fontSize = 14.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FilterChip(prorate == "calendar", { prorate = "calendar" }, label = { Text("달력일수") })
+            FilterChip(prorate == "workdays", { prorate = "workdays" }, label = { Text("근무일수") })
+        }
+        SwitchRow("중도 입·퇴사 기간도 개근하면 만근수당 지급", bonusPartial) { bonusPartial = it }
+        Text("입사월은 1일 입사가 아니면 국민연금·건강보험이 다음 달부터 빠져요 (자동 반영).", fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+
+        Text("연차", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
+        SwitchRow("근로기준법대로 자동 계산 (1년 미만 월 1일, 이후 15일+)", leaveAuto) { leaveAuto = it }
+        if (!leaveAuto) Field("연간 연차 일수", leaveDays, { leaveDays = it.filter { ch -> ch.isDigit() }.take(2) }, number = true)
+        Text("연차 기준일", fontSize = 14.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FilterChip(leaveBasis == "hire", { leaveBasis = "hire" }, label = { Text("입사일 기준") })
+            FilterChip(leaveBasis == "calendar", { leaveBasis = "calendar" }, label = { Text("1월 1일 기준") })
+        }
+        Field("작년에서 이월된 연차 (일)", carry, { carry = it }, number = true, hint = "없으면 비워두세요 · 반일은 0.5")
+
         Button(onClick = {
             val err = mutableListOf<String>()
             val la = lat.toDoubleOrNull(); val lo = lon.toDoubleOrNull()
@@ -165,6 +221,9 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
             if (!we.isAfter(ws)) err += "출퇴근 시각"
             if (end != null && end!!.isBefore(start)) err += "퇴사일"
             if (name.isBlank()) err += "회사 이름"
+            if (!payLast && (payDay.toIntOrNull() ?: 0) !in 1..31) err += "급여일(1~31)"
+            if ((pStart.toIntOrNull() ?: 0) !in 1..28) err += "산정기간 시작일(1~28)"
+            if (carry.isNotBlank() && carry.toDoubleOrNull() == null) err += "이월 연차"
             val others = repo.companies.filter { it.id != c.id }
             if (others.any { o -> !start.isAfter(o.endDate ?: LocalDate.MAX) && !(end ?: LocalDate.MAX).isBefore(o.startDate) })
                 err += "다른 회사와 재직기간 겹침"
@@ -176,7 +235,12 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
                 baseSalary = base.filter { it.isDigit() }.toIntOrNull() ?: c.baseSalary, baseLinkedToMinWage = linked,
                 overtimeRate = (rate.toDoubleOrNull() ?: 1.0).coerceIn(1.0, 3.0), overtimeUnitMin = unit.toIntOrNull()?.coerceIn(1, 60) ?: 30,
                 fullAttendanceBonus = bonus.filter { it.isDigit() }.toIntOrNull() ?: 0, weekendDays = weekend,
-                extraHolidays = xhs, extraWorkdays = xws))
+                extraHolidays = xhs, extraWorkdays = xws,
+                periodStartDay = pStart.toIntOrNull()?.coerceIn(1, 28) ?: 1,
+                payDay = if (payLast) 0 else payDay.toIntOrNull()?.coerceIn(1, 31) ?: 10,
+                payMonthOffset = payOff, payAdjust = payAdj, prorateBy = prorate, bonusOnPartial = bonusPartial,
+                annualLeaveDays = if (leaveAuto) -1 else leaveDays.toIntOrNull()?.coerceIn(0, 60) ?: 15,
+                leaveBasis = leaveBasis, leaveCarryover = carry.toDoubleOrNull()?.coerceIn(0.0, 60.0) ?: 0.0))
             repo.onboarded = true
             Scheduler.scheduleAll(ctx); Geo.register(ctx)
             Toast.makeText(ctx, "저장했어요", Toast.LENGTH_SHORT).show()
@@ -347,9 +411,7 @@ private fun UpdateCard(version: Int, bump: () -> Unit) {
     var token by remember { mutableStateOf(Updater.token(ctx)) }
     var status by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
-    var found by remember(version) { mutableStateOf(Updater.pending(ctx)) }
-    var apk by remember { mutableStateOf<java.io.File?>(null) }
-    fun ui(f: () -> Unit) { act?.runOnUiThread(f) ?: f() }
+    val found = remember(version) { Updater.pending(ctx) }
 
     SCard {
         CardTitle("앱 업데이트", trailing = { Tag("현재 ${Updater.currentName(ctx)}", MaterialTheme.colorScheme.primary) })
@@ -361,36 +423,20 @@ private fun UpdateCard(version: Int, bump: () -> Unit) {
                 busy = true; status = "확인 중…"
                 Thread {
                     val r = runCatching { Updater.check(ctx) }
-                    ui {
+                    val apply = Runnable {
                         busy = false
-                        r.onSuccess { found = it; status = if (it == null) "최신 버전이에요" else "새 버전 ${it.name} 있어요" }
-                         .onFailure { status = "⚠ ${it.message}" }
+                        r.onSuccess { rel ->
+                            status = if (rel == null) "최신 버전이에요 ✓" else "새 버전 ${rel.name} 있어요"
+                            if (rel != null) UpdateState.show(rel)
+                        }.onFailure { status = "⚠ ${it.message}" }
                         bump()
                     }
+                    if (act != null) act.runOnUiThread(apply) else apply.run()
                 }.start()
-            }, enabled = !busy) { Text("업데이트 확인") }
-            val f = found
-            if (f != null) FilledTonalButton(onClick = {
-                val ready = apk
-                if (ready != null) { if (!Updater.install(ctx, ready)) status = "'이 출처의 앱 허용'을 켠 뒤 다시 누르세요"; return@FilledTonalButton }
-                busy = true; status = "다운로드 0%"
-                Thread {
-                    val r = runCatching { Updater.download(ctx, f) { p -> ui { status = "다운로드 $p%" } } }
-                    ui {
-                        busy = false
-                        r.onSuccess { file ->
-                            apk = file; status = "다운로드 완료"
-                            if (!Updater.install(ctx, file)) status = "'이 출처의 앱 허용'을 켠 뒤 [설치]를 다시 누르세요"
-                        }.onFailure { status = "⚠ ${it.message}" }
-                    }
-                }.start()
-            }, enabled = !busy) { Text(if (apk != null) "설치" else "받아서 설치") }
+            }, enabled = !busy) { Text(if (busy) "확인 중…" else "업데이트 확인") }
+            if (found != null) FilledTonalButton(onClick = { UpdateState.show(found) }) { Text("${found.name} 설치") }
         }
         if (status.isNotBlank()) Text(status, fontSize = 14.sp, modifier = Modifier.padding(top = 8.dp))
-        found?.notes?.takeIf { it.isNotBlank() }?.let {
-            Text("변경 내용: ${it.take(300)}", fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp),
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .7f))
-        }
         Text("GitHub에 수정본을 올리면 자동으로 새 릴리즈가 만들어지고, 앱이 하루 몇 번 확인해서 알려줘요. 기록은 그대로 유지돼요.",
             fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f), modifier = Modifier.padding(top = 8.dp))
     }

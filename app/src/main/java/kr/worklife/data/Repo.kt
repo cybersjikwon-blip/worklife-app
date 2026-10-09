@@ -46,7 +46,7 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
     /** 그 날짜에 재직 중인 회사 (겹치면 최근 입사) */
     fun companyOn(d: LocalDate): Company? = companies.filter { it.activeOn(d) }.maxByOrNull { it.startDate }
     fun currentCompany(): Company = companyOn(LocalDate.now()) ?: companies.last()
-    fun companiesIn(ym: YearMonth) = companies.filter { c -> monthDays(ym).any { c.activeOn(it) } }
+    fun companiesIn(ym: YearMonth) = companies.filter { c -> periodOf(c, ym).days.any { c.activeOn(it) } }
 
     /** 이직: 기존 회사 마감 + 새 회사(근무조건은 복사, 위치는 비움) */
     fun moveCompany(newName: String, start: LocalDate): Company {
@@ -78,6 +78,12 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
 
     fun month(ym: YearMonth, companyId: Long): Map<LocalDate, DayRecord> =
         queryDays("day LIKE ? AND company=?", arrayOf("$ym-%", companyId.toString())).associateBy { it.day }
+
+    /** 기간 조회 (급여 산정기간이 달을 걸쳐도 OK) */
+    fun range(start: LocalDate, end: LocalDate, companyId: Long): Map<LocalDate, DayRecord> =
+        queryDays("day >= ? AND day <= ? AND company=?", arrayOf(start.toString(), end.toString(), companyId.toString())).associateBy { it.day }
+
+    fun period(p: PayPeriod, companyId: Long) = range(p.start, p.end, companyId)
 
     fun firstRecordMonth(): YearMonth? = readableDatabase.rawQuery("SELECT MIN(day) FROM days", null).use {
         if (it.moveToFirst() && !it.isNull(0)) YearMonth.from(LocalDate.parse(it.getString(0))) else null
@@ -146,6 +152,9 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
             put("lunch", c.lunchMin); put("base", c.baseSalary); put("linked", c.baseLinkedToMinWage); put("otRate", c.overtimeRate)
             put("otUnit", c.overtimeUnitMin); put("bonus", c.fullAttendanceBonus); put("weekend", JSONArray(c.weekendDays.toList()))
             put("xh", JSONArray(c.extraHolidays.toList())); put("xw", JSONArray(c.extraWorkdays.toList()))
+            put("pStart", c.periodStartDay); put("payDay", c.payDay); put("payOff", c.payMonthOffset); put("payAdj", c.payAdjust)
+            put("prorate", c.prorateBy); put("bonusPartial", c.bonusOnPartial)
+            put("leaveDays", c.annualLeaveDays); put("leaveBasis", c.leaveBasis); put("leaveCarry", c.leaveCarryover)
         }
 
         fun companyFromJson(j: JSONObject): Company {
@@ -159,7 +168,10 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
                 j.optInt("base", d.baseSalary), j.optBoolean("linked", false), j.optDouble("otRate", d.overtimeRate),
                 j.optInt("otUnit", d.overtimeUnitMin), j.optInt("bonus", d.fullAttendanceBonus),
                 j.optJSONArray("weekend")?.let { a -> (0 until a.length()).map { a.getInt(it) }.toSet() } ?: d.weekendDays,
-                strs("xh"), strs("xw"))
+                strs("xh"), strs("xw"),
+                j.optInt("pStart", d.periodStartDay), j.optInt("payDay", d.payDay), j.optInt("payOff", d.payMonthOffset),
+                j.optString("payAdj", d.payAdjust), j.optString("prorate", d.prorateBy), j.optBoolean("bonusPartial", d.bonusOnPartial),
+                j.optInt("leaveDays", d.annualLeaveDays), j.optString("leaveBasis", d.leaveBasis), j.optDouble("leaveCarry", d.leaveCarryover))
         }
 
         fun settingsToJson(s: AppSettings) = JSONObject().apply {

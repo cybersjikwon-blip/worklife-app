@@ -28,19 +28,26 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
 
     val repo = Repo.get(ctx)
     val today = now.toLocalDate()
-    val ym = YearMonth.from(today)
     val data = remember(version, now) {
         val c = repo.currentCompany(); val s = repo.settings
-        val stored = HashMap(repo.month(ym, c.id))
+        val period = periodContaining(c, today)
         val monday = today.minusDays((today.dayOfWeek.value - 1).toLong())
-        if (YearMonth.from(monday) != ym) stored.putAll(repo.month(YearMonth.from(monday), c.id))
+        val from = if (monday.isBefore(period.start)) monday else period.start
+        val stored = HashMap(repo.range(from, period.end, c.id))
         val rec = stored[today]
         val tracker = Engine.evaluate(ctx, today).tracker
-        val live = if (rec?.checkOut == null) tracker?.liveOvertimeMin(now) ?: 0 else 0
+        val workday = HolidayCalendar(c).isWorkday(today)
+        val live = if (workday && rec?.checkOut == null && (rec == null || rec.status == Status.WORK)) tracker?.liveOvertimeMin(now) ?: 0 else 0
         val sum = overtimeSummary(c, s, today, stored, live)
-        val monthRecs = buildMonth(c, ym, stored.filterKeys { YearMonth.from(it) == ym }, today)
-        val pay = calcPayroll(c, s, ym, monthRecs, today)
-        HomeData(c, s, rec, tracker, live, sum, pay, monthRecs.filter { it.source == Source.NEEDS_CHECK })
+        val monthRecs = buildPeriod(c, period, stored.filterKeys { period.contains(it) }, today)
+        val pay = calcPayroll(c, s, period, monthRecs, today)
+        // 다음 급여일 (지난 기간 급여가 아직 안 나왔으면 그 기간)
+        val np = nextPayday(c, today)
+        val npPay = if (np.label == period.label) pay
+            else calcPayroll(c, s, np, buildPeriod(c, np, repo.period(np, c.id), today), today)
+        val (ls, le) = leaveWindow(c, today)
+        val leave = leaveSummary(c, today, repo.range(ls, le, c.id).values.toList())
+        HomeData(c, s, rec, tracker, live, sum, pay, monthRecs.filter { it.source == Source.NEEDS_CHECK }, period, np, npPay, leave)
     }
     val c = data.c
     val hol = HolidayCalendar(c).holidayName(today)
@@ -50,9 +57,9 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
 
         // ── 경고/안내
         val upd = remember(version) { Updater.pending(ctx) }
-        if (upd != null) SCard(onClick = goSettings) {
+        if (upd != null) SCard(onClick = { UpdateState.show(upd) }) {
             Text("새 버전 ${upd.name}이 나왔어요", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
-            Text("눌러서 설정 > 앱 업데이트에서 설치하세요. 기록은 그대로 유지돼요.", fontSize = 14.sp)
+            Text("눌러서 바로 업데이트하세요. 기록은 그대로 유지돼요.", fontSize = 14.sp)
         }
         if (!c.hasLocation) SCard(onClick = goSettings) {
             Text("회사 위치를 등록해 주세요", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.error)
@@ -60,6 +67,21 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
         } else if (!ctx.hasFineLoc() || !ctx.hasBgLoc()) SCard(onClick = goSettings) {
             Text("위치 권한을 '항상 허용'으로 바꿔 주세요", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.error)
             Text("앱을 닫아도 퇴근을 감지하려면 필요해요. 설정 > 권한 점검", fontSize = 14.sp)
+        }
+        // 휴일인데 회사 반경에 오래 머문 경우: 자동 기록 대신 제안
+        val tr = data.tracker
+        val fi = tr?.firstInside; val li = tr?.lastInside
+        if (hol != null && data.rec == null && fi != null && li != null && java.time.Duration.between(fi, li).toMinutes() >= 60) SCard {
+            Text("휴일인데 회사에 ${hmShort(java.time.Duration.between(fi, li).toMinutes().toInt())} 계셨어요", fontWeight = FontWeight.SemiBold, color = OtOrange)
+            Text("${fi.toLocalTime().hhmm()} ~ ${li.toLocalTime().hhmm()} · 실제로 일하셨으면 휴일근무로 기록하세요. 회사 위치가 집으로 잡혀 있다면 설정에서 고쳐주세요.", fontSize = 14.sp)
+            Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton(onClick = {
+                    repo.saveDay(DayRecord(today, c.id, Status.HOLIDAY_WORK, fi.toLocalTime().withSecond(0).withNano(0),
+                        li.toLocalTime().withSecond(0).withNano(0), Source.MANUAL, "휴일근무"))
+                    bump()
+                }) { Text("휴일근무로 기록") }
+                OutlinedButton(onClick = goSettings) { Text("회사 위치 확인") }
+            }
         }
         if (data.needCheck.isNotEmpty()) SCard(onClick = goRecords) {
             Text("퇴근 확인이 필요한 날 ${data.needCheck.size}일", fontWeight = FontWeight.SemiBold, color = OtOrange)
@@ -72,7 +94,7 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
             val (title, sub) = todayStatus(c, data, hol, now)
             Text(title, fontSize = 24.sp, fontWeight = FontWeight.Bold)
             Text(sub, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f), modifier = Modifier.padding(top = 4.dp))
-            if (hol == null && data.rec?.status != Status.ABSENT && data.rec?.status != Status.LEAVE) {
+            if (hol == null && data.rec?.status != Status.ABSENT && data.rec?.status != Status.LEAVE && data.rec?.status != Status.HALF_LEAVE) {
                 Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilledTonalButton(onClick = {
                         repo.saveDay(DayRecord(today, c.id, Status.WORK, hm(c.workStart), LocalTime.now().withSecond(0).withNano(0), Source.MANUAL, "수동 퇴근"))
@@ -94,7 +116,7 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
             Row(Modifier.fillMaxWidth()) {
                 OtTile("오늘", sm.todayMin, sm.todayPay, Modifier.weight(1f))
                 OtTile("이번 주", sm.weekMin, sm.weekPay, Modifier.weight(1f))
-                OtTile("이번 달", sm.monthMin, sm.monthPay, Modifier.weight(1f))
+                OtTile(if (c.periodStartDay <= 1) "이번 달" else "이번 기간", sm.monthMin, sm.monthPay, Modifier.weight(1f))
             }
             val ratio = (sm.weekMin.toFloat() / sm.weekLimitMin).coerceIn(0f, 1f)
             Spacer(Modifier.height(16.dp))
@@ -122,7 +144,7 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
 
         // ── 이번 달 예상 급여
         SCard {
-            CardTitle("${ym.monthValue}월 예상 급여")
+            CardTitle("${data.period.label.monthValue}월분 예상 급여", trailing = { Text(data.period.rangeText(), fontSize = 13.sp) })
             KV("지급 합계", won(data.pay.gross))
             KV("공제 합계", "-" + won(data.pay.totalDeduct))
             HorizontalDivider(Modifier.padding(vertical = 6.dp))
@@ -130,14 +152,54 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
                 Text("실수령", fontSize = 15.sp, modifier = Modifier.weight(1f))
                 Text(won(data.pay.net), fontSize = 26.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
             }
-            Text("오늘까지 기록 + 남은 근무일 정시 기준", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+            Text("오늘까지 기록 + 남은 근무일 정시 기준 · 지급 ${data.period.payDate.monthValue}/${data.period.payDate.dayOfMonth}",
+                fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+        }
+
+        // ── 다음 급여일
+        SCard {
+            val np = data.nextPay
+            val dday = ChronoUnit.DAYS.between(today, np.payDate)
+            CardTitle("다음 급여일", trailing = { Tag(if (dday == 0L) "오늘!" else "D-$dday", if (dday <= 3) OkGreen else MaterialTheme.colorScheme.primary) })
+            Text("${np.payDate.monthValue}월 ${np.payDate.dayOfMonth}일 (${wd(np.payDate)})", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text("${np.label.monthValue}월분 (${np.rangeText()}) · 예상 실수령 ${won(data.nextPayslip.net)}", fontSize = 14.sp,
+                modifier = Modifier.padding(top = 4.dp))
+        }
+
+        // ── 연차
+        val lv = data.leave
+        SCard(onClick = goRecords) {
+            CardTitle("연차", trailing = {
+                Tag(if (lv.auto) "자동 계산" else "직접 입력", MaterialTheme.colorScheme.primary)
+            })
+            Row(Modifier.fillMaxWidth()) {
+                LeaveTile("남은", lv.remaining, if (lv.remaining < 0) MaterialTheme.colorScheme.error else OkGreen, Modifier.weight(1f))
+                LeaveTile("사용", lv.used, MaterialTheme.colorScheme.onSurface, Modifier.weight(1f))
+                LeaveTile("예정", lv.planned, OtOrange, Modifier.weight(1f))
+                LeaveTile("전체", lv.total, MaterialTheme.colorScheme.onSurface, Modifier.weight(1f))
+            }
+            Text("${lv.yearStart} ~ ${lv.yearEnd}" + (if (lv.firstYear) " · 입사 1년 미만 (매월 1일씩 발생)" else "") +
+                    (if (lv.remaining < 0) " · 연차를 초과했어요" else ""), fontSize = 12.sp,
+                color = if (lv.remaining < 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
+                modifier = Modifier.padding(top = 8.dp))
         }
         Spacer(Modifier.height(24.dp))
     }
 }
 
 data class HomeData(val c: Company, val s: AppSettings, val rec: DayRecord?, val tracker: GeofenceTracker?,
-                    val live: Int, val sum: OtSummary, val pay: Payslip, val needCheck: List<DayRecord>)
+                    val live: Int, val sum: OtSummary, val pay: Payslip, val needCheck: List<DayRecord>,
+                    val period: PayPeriod, val nextPay: PayPeriod, val nextPayslip: Payslip, val leave: LeaveSummary)
+
+fun days(v: Double): String = if (v % 1.0 == 0.0) "${v.toInt()}일" else "${"%.1f".format(v)}일"
+
+@Composable
+private fun LeaveTile(label: String, v: Double, color: androidx.compose.ui.graphics.Color, modifier: Modifier) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(label, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f))
+        Text(days(v), fontSize = 19.sp, fontWeight = FontWeight.Bold, color = color, modifier = Modifier.padding(top = 4.dp))
+    }
+}
 
 @Composable
 private fun OtTile(label: String, min: Int, pay: Int, modifier: Modifier) {
@@ -156,6 +218,7 @@ private fun todayStatus(c: Company, d: HomeData, hol: String?, now: LocalDateTim
     return when {
         r?.status == Status.ABSENT -> "결근" to "만근수당이 지급되지 않아요"
         r?.status == Status.LEAVE -> "연차" to "오늘은 쉬어요"
+        r?.status == Status.HALF_LEAVE -> "반차" to "${r?.checkIn?.hhmm() ?: "-"} ~ ${r?.checkOut?.hhmm() ?: "-"}"
         r?.checkOut != null -> {
             val rr = r!!
             val ot = overtimeMin(c, rr)

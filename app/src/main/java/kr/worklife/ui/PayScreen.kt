@@ -31,11 +31,13 @@ fun payHistory(repo: Repo, today: LocalDate = LocalDate.now()): List<PayHistory>
     var ym = maxOf(first, now.minusMonths(35))
     val s = repo.settings
     val live = mutableListOf<PayHistory>()
-    while (!ym.isAfter(now)) {
+    while (!ym.isAfter(now.plusMonths(1))) {
         for (c in repo.companiesIn(ym)) {
             if ((ym to c.id) in keys) continue
-            val p = calcPayroll(c, s, ym, buildMonth(c, ym, repo.month(ym, c.id), today), today)
-            live += PayHistory(ym, c.id, c.name, p.gross, p.totalDeduct, p.net, if (ym == now) "진행중" else "미확정", p.lines())
+            val per = periodOf(c, ym)
+            if (per.start.isAfter(today)) continue
+            val p = calcPayroll(c, s, per, buildPeriod(c, per, repo.period(per, c.id), today), today)
+            live += PayHistory(ym, c.id, c.name, p.gross, p.totalDeduct, p.net, if (per.contains(today)) "진행중" else "미확정", p.lines())
         }
         ym = ym.plusMonths(1)
     }
@@ -57,11 +59,13 @@ fun PayScreen(version: Int, bump: () -> Unit, ym: YearMonth, setYm: (YearMonth) 
         val history = remember(version) { payHistory(repo, today) }
 
         if (c != null) {
+            val per = remember(ym, c) { periodOf(c, ym) }
+            PeriodLine(per)
             val snap = history.firstOrNull { it.ym == ym && it.companyId == c.id && (it.kind == "확정" || it.kind == "직접입력") }
-            val p = remember(version, ym, c) { calcPayroll(c, repo.settings, ym, buildMonth(c, ym, repo.month(ym, c.id), today), today) }
+            val p = remember(version, ym, c) { calcPayroll(c, repo.settings, per, buildPeriod(c, per, repo.period(per, c.id), today), today) }
             SCard {
                 CardTitle(c.name, trailing = {
-                    Tag(snap?.kind ?: if (YearMonth.from(today) == ym) "진행중" else "미확정",
+                    Tag(snap?.kind ?: if (per.contains(today)) "진행중" else if (per.start.isAfter(today)) "예정" else "미확정",
                         if (snap != null) OkGreen else OtOrange)
                 })
                 val lines = snap?.lines ?: p.lines()
@@ -77,7 +81,7 @@ fun PayScreen(version: Int, bump: () -> Unit, ym: YearMonth, setYm: (YearMonth) 
                 }
                 Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (snap == null) {
-                        Button(onClick = { repo.savePayslip(p); bump() }, enabled = !ym.isAfter(YearMonth.from(today))) { Text("이 달 확정") }
+                        Button(onClick = { repo.savePayslip(p); bump() }, enabled = !per.start.isAfter(today)) { Text("이 달 확정") }
                         OutlinedButton(onClick = { manual = true }) { Text("실제 금액 입력") }
                     } else {
                         OutlinedButton(onClick = { repo.deletePay(ym, c.id); bump() }) { Text("확정 취소(다시 계산)") }

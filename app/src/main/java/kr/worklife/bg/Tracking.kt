@@ -146,6 +146,7 @@ class AlarmReceiver : BroadcastReceiver() {
             Scheduler.ACT_TRACK -> if (Scheduler.shouldTrackNow(ctx)) Scheduler.startTracking(ctx)
             Scheduler.ACT_SETTLE -> {
                 Engine.settlePast(ctx)
+                runCatching { Engine.paydayNotice(ctx) }
                 val pr = goAsync()
                 Updater.autoCheck(ctx, notify = true) { pr.finish() }
             }

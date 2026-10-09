@@ -44,10 +44,12 @@ fun RecordsScreen(version: Int, bump: () -> Unit, ym: YearMonth, setYm: (YearMon
             Text("이 달에 재직한 회사가 없어요", Modifier.padding(24.dp)); return@Column
         }
         val today = LocalDate.now()
-        val recs = remember(version, ym, c) { buildMonth(c, ym, repo.month(ym, c.id), today) }
+        val period = remember(ym, c) { periodOf(c, ym) }
+        PeriodLine(period)
+        val recs = remember(version, ym, c) { buildPeriod(c, period, repo.period(period, c.id), today) }
         val tot = recs.sumOf { overtimeMin(c, it) }
         Text("근무 ${recs.count { it.status == Status.WORK && it.checkOut != null }}일 · 결근 ${recs.count { it.status == Status.ABSENT }} · " +
-                "연차 ${recs.count { it.status == Status.LEAVE }} · 연장 ${hmShort(tot)}",
+                "연차 ${days(recs.sumOf { leaveWeight(it) })} · 연장 ${hmShort(tot)}",
             Modifier.padding(horizontal = 24.dp, vertical = 8.dp), fontSize = 14.sp)
         LazyColumn(Modifier.fillMaxSize()) {
             items(recs, key = { it.day.toString() }) { r -> DayRow(c, r, today) { editing = r } }
@@ -76,12 +78,13 @@ private fun DayRow(c: Company, r: DayRecord, today: LocalDate, onClick: () -> Un
             Column(Modifier.width(58.dp)) {
                 Text("${r.day.dayOfMonth}", fontSize = 20.sp, fontWeight = FontWeight.Bold,
                     color = (if (r.day.dayOfWeek.value == 7 || r.status == Status.HOLIDAY) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface).copy(alpha = alpha))
-                Text(wd(r.day), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+                Text(if (r.day.dayOfMonth == 1) "${r.day.monthValue}월 ${wd(r.day)}" else wd(r.day), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
             }
             Column(Modifier.weight(1f)) {
                 val main = when (r.status) {
                     Status.HOLIDAY -> r.note.ifBlank { "휴일" }
                     Status.ABSENT, Status.LEAVE -> r.status.label
+                    Status.HALF_LEAVE -> "반차 ${r.checkIn?.hhmm() ?: ""} ~ ${r.checkOut?.hhmm() ?: ""}"
                     else -> "${r.checkIn?.hhmm() ?: "-"} ~ ${r.checkOut?.hhmm() ?: "예정"}"
                 }
                 Text(main, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha))
@@ -97,6 +100,7 @@ private fun DayRow(c: Company, r: DayRecord, today: LocalDate, onClick: () -> Un
                     r.source == Source.NEEDS_CHECK -> Tag("확인필요", MaterialTheme.colorScheme.error)
                     r.status == Status.ABSENT -> Tag("결근", MaterialTheme.colorScheme.error)
                     r.status == Status.LEAVE -> Tag("연차", OkGreen)
+                    r.status == Status.HALF_LEAVE -> Tag("반차", OkGreen)
                     r.status != Status.HOLIDAY && !r.day.isAfter(today) -> Tag(r.source.label, MaterialTheme.colorScheme.primary)
                     else -> {}
                 }
@@ -118,11 +122,11 @@ fun EditDayDialog(c: Company, r: DayRecord, onDismiss: () -> Unit, onSave: (DayR
         title = { Text("${r.day.monthValue}월 ${r.day.dayOfMonth}일 (${wd(r.day)})") },
         text = {
             Column {
-                val options = if (isHoliday) listOf(Status.HOLIDAY, Status.HOLIDAY_WORK) else listOf(Status.WORK, Status.ABSENT, Status.LEAVE)
+                val options = if (isHoliday) listOf(Status.HOLIDAY, Status.HOLIDAY_WORK) else listOf(Status.WORK, Status.HALF_LEAVE, Status.LEAVE, Status.ABSENT)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     options.forEach { st -> FilterChip(status == st, { status = st }, label = { Text(st.label) }) }
                 }
-                if (status == Status.WORK || status == Status.HOLIDAY_WORK) {
+                if (status == Status.WORK || status == Status.HOLIDAY_WORK || status == Status.HALF_LEAVE) {
                     Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = { pickTime(ctx, ci) { ci = it } }, Modifier.weight(1f)) { Text("출근 ${ci.hhmm()}") }
                         OutlinedButton(onClick = { pickTime(ctx, co) { co = it } }, Modifier.weight(1f)) { Text("퇴근 ${co.hhmm()}") }
@@ -136,7 +140,7 @@ fun EditDayDialog(c: Company, r: DayRecord, onDismiss: () -> Unit, onSave: (DayR
         },
         confirmButton = {
             TextButton(onClick = {
-                val keepTimes = status == Status.WORK || status == Status.HOLIDAY_WORK
+                val keepTimes = status == Status.WORK || status == Status.HOLIDAY_WORK || status == Status.HALF_LEAVE
                 if (status == Status.HOLIDAY) onReset()
                 else onSave(DayRecord(r.day, c.id, status, if (keepTimes) ci else null, if (keepTimes) co else null, Source.MANUAL, note))
             }, enabled = !(co.isBefore(ci) && (status == Status.WORK || status == Status.HOLIDAY_WORK))) { Text("저장") }

@@ -89,7 +89,7 @@ object Updater {
         }
 
     /** APK 다운로드 → 검증된 파일 반환. 네트워크 작업이므로 백그라운드에서 */
-    fun download(ctx: Context, r: Release, progress: (Int) -> Unit): File {
+    fun download(ctx: Context, r: Release, progress: (Long, Long) -> Unit): File {
         val dir = File(ctx.cacheDir, "updates").apply { mkdirs(); listFiles()?.forEach { it.delete() } }
         val out = File(dir, "worklife-${r.code}.apk")
         val tk = token(ctx)
@@ -110,15 +110,18 @@ object Updater {
             val total = if (c.contentLengthLong > 0) c.contentLengthLong else r.size
             c.inputStream.use { inp ->
                 out.outputStream().use { o ->
-                    val buf = ByteArray(64 * 1024); var done = 0L; var last = -1
+                    val buf = ByteArray(64 * 1024); var done = 0L; var lastAt = 0L
+                    progress(0, total)
                     while (true) {
                         val n = inp.read(buf); if (n < 0) break
                         o.write(buf, 0, n); done += n
-                        if (total > 0) { val p = (done * 100 / total).toInt(); if (p != last) { last = p; progress(p) } }
+                        val now = System.currentTimeMillis()
+                        if (now - lastAt > 120) { lastAt = now; progress(done, total); notifyProgress(ctx, r, done, total) }
                     }
+                    progress(done, if (total > 0) total else done)
                 }
             }
-        } finally { c.disconnect() }
+        } finally { c.disconnect(); clearProgress(ctx) }
         // 검증: 우리 앱인지, 더 새 버전인지
         val info = ctx.packageManager.getPackageArchiveInfo(out.absolutePath, 0)
         if (info == null || info.packageName != ctx.packageName) { out.delete(); throw IllegalStateException("받은 파일이 이 앱의 APK가 아니에요") }
@@ -126,6 +129,20 @@ object Updater {
         if (newCode <= currentCode(ctx)) { out.delete(); throw IllegalStateException("이미 최신 버전이에요") }
         return out
     }
+
+    /** 알림창 진행 막대 (앱을 내려도 진행 확인) */
+    private fun notifyProgress(ctx: Context, r: Release, done: Long, total: Long) {
+        runCatching {
+            val pct = if (total > 0) (done * 100 / total).toInt() else 0
+            val n = androidx.core.app.NotificationCompat.Builder(ctx, Notif.CH_TRACK)
+                .setSmallIcon(kr.worklife.R.drawable.ic_stat).setContentTitle("새 버전 ${r.name} 받는 중")
+                .setContentText("$pct% · ${mb(done)} / ${mb(total)}").setProgress(100, pct, total <= 0)
+                .setOngoing(true).setOnlyAlertOnce(true).setContentIntent(Notif.openApp(ctx)).build()
+            androidx.core.app.NotificationManagerCompat.from(ctx).notify(21, n)
+        }
+    }
+    private fun clearProgress(ctx: Context) { runCatching { androidx.core.app.NotificationManagerCompat.from(ctx).cancel(21) } }
+    fun mb(b: Long) = if (b <= 0) "-" else "%.1fMB".format(b / 1_048_576.0)
 
     /** 설치 화면 띄우기. '이 출처 허용'이 꺼져 있으면 설정 화면으로 보내고 false */
     fun install(ctx: Context, apk: File): Boolean {

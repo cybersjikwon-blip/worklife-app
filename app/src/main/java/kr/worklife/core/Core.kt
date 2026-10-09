@@ -31,7 +31,7 @@ val DEFAULT_INS: Map<Int, InsRates> = mapOf(
 )
 val UNCONFIRMED_INS_YEARS = setOf(2027)
 
-enum class Status(val label: String) { WORK("근무"), ABSENT("결근"), LEAVE("연차"), HOLIDAY("휴일"), HOLIDAY_WORK("휴일근무") }
+enum class Status(val label: String) { WORK("근무"), ABSENT("결근"), LEAVE("연차"), HALF_LEAVE("반차"), HOLIDAY("휴일"), HOLIDAY_WORK("휴일근무") }
 enum class Source(val label: String) { AUTO("자동"), MANUAL("수동"), DEFAULT("기본"), NEEDS_CHECK("확인필요") }
 
 fun floor10(x: Double): Int = if (x > 0) (floor(x / 10.0) * 10).toInt() else 0
@@ -59,6 +59,18 @@ data class Company(
     val weekendDays: Set<Int> = setOf(6, 7), // ISO: 1=월 … 7=일
     val extraHolidays: Set<String> = emptySet(),
     val extraWorkdays: Set<String> = emptySet(),
+    // ── 급여 산정기간·급여일
+    val periodStartDay: Int = 1,        // 1 = 매월 1일~말일, 21 = 전월 21일~당월 20일 (최대 28)
+    val payDay: Int = 10,               // 0 = 말일
+    val payMonthOffset: Int = 1,        // 0 = 같은 달, 1 = 다음 달 지급 (기간이 끝나는 달 기준)
+    val payAdjust: String = "before",   // 급여일이 휴일이면: before 앞당김 / after 미룸 / none 그대로
+    // ── 중도 입·퇴사
+    val prorateBy: String = "calendar", // calendar 달력일수 / workdays 근무일수
+    val bonusOnPartial: Boolean = false,// 중도 입·퇴사 기간에도 개근이면 만근수당 지급
+    // ── 연차
+    val annualLeaveDays: Int = -1,      // -1 = 근로기준법 자동 계산
+    val leaveBasis: String = "hire",    // hire 입사일 기준 / calendar 1월 1일 기준
+    val leaveCarryover: Double = 0.0,   // 이월 연차
 ) {
     val hasLocation get() = lat != 0.0 || lon != 0.0
     fun activeOn(d: LocalDate) = !d.isBefore(startDate) && (endDate == null || !d.isAfter(endDate))
@@ -268,10 +280,56 @@ fun holidayWorkMin(c: Company, r: DayRecord): Int {
     return max(0, m)
 }
 
-/** 저장된 기록 + 빈 날 자동 채움. 오늘 이후 근무일은 퇴근=null(예정). 다른 회사 재직 기간은 제외 */
-fun buildMonth(c: Company, ym: YearMonth, stored: Map<LocalDate, DayRecord>, today: LocalDate): List<DayRecord> {
+// ─────────────────────────── 급여 산정기간 ───────────────────────────
+/** label = 기간이 끝나는 달 (예: 9/21~10/20 → 10월분) */
+data class PayPeriod(val label: YearMonth, val start: LocalDate, val end: LocalDate, val payDate: LocalDate) {
+    val days: List<LocalDate> get() = generateSequence(start) { it.plusDays(1) }.takeWhile { !it.isAfter(end) }.toList()
+    fun contains(d: LocalDate) = !d.isBefore(start) && !d.isAfter(end)
+    fun rangeText() = "${start.monthValue}/${start.dayOfMonth}~${end.monthValue}/${end.dayOfMonth}"
+}
+
+private fun Company.startDayFixed() = periodStartDay.coerceIn(1, 28)
+
+fun periodOf(c: Company, label: YearMonth): PayPeriod {
+    val sd = c.startDayFixed()
+    val start = if (sd == 1) label.atDay(1) else label.minusMonths(1).atDay(sd)
+    val end = if (sd == 1) label.atEndOfMonth() else label.atDay(sd - 1)
+    return PayPeriod(label, start, end, payDateOf(c, label))
+}
+
+fun periodContaining(c: Company, d: LocalDate): PayPeriod {
+    val sd = c.startDayFixed()
+    val label = if (sd == 1 || d.dayOfMonth < sd) YearMonth.from(d) else YearMonth.from(d).plusMonths(1)
+    return periodOf(c, label)
+}
+
+fun payDateOf(c: Company, label: YearMonth): LocalDate {
+    val m = label.plusMonths(c.payMonthOffset.coerceIn(0, 2).toLong())
+    var d = if (c.payDay <= 0 || c.payDay > m.lengthOfMonth()) m.atEndOfMonth() else m.atDay(c.payDay)
     val cal = HolidayCalendar(c)
-    return monthDays(ym).filter { c.activeOn(it) }.map { d ->
+    var guard = 0
+    while (!cal.isWorkday(d) && c.payAdjust != "none" && guard++ < 14) d = if (c.payAdjust == "after") d.plusDays(1) else d.minusDays(1)
+    return d
+}
+
+/** 오늘 이후(오늘 포함) 가장 가까운 급여일과 그 급여의 기간 */
+fun nextPayday(c: Company, today: LocalDate): PayPeriod {
+    val cur = periodContaining(c, today).label
+    return (-3L..3L).map { periodOf(c, cur.plusMonths(it)) }.filter { !it.payDate.isBefore(today) }.minByOrNull { it.payDate }
+        ?: periodOf(c, cur.plusMonths(1))
+}
+
+/** 기간 안의 날짜별 기록 (빈 날 자동 채움) */
+fun buildPeriod(c: Company, p: PayPeriod, stored: Map<LocalDate, DayRecord>, today: LocalDate): List<DayRecord> =
+    fill(c, p.days, stored, today)
+
+/** 저장된 기록 + 빈 날 자동 채움. 오늘 이후 근무일은 퇴근=null(예정). 다른 회사 재직 기간은 제외 */
+fun buildMonth(c: Company, ym: YearMonth, stored: Map<LocalDate, DayRecord>, today: LocalDate): List<DayRecord> =
+    fill(c, monthDays(ym), stored, today)
+
+private fun fill(c: Company, dates: List<LocalDate>, stored: Map<LocalDate, DayRecord>, today: LocalDate): List<DayRecord> {
+    val cal = HolidayCalendar(c)
+    return dates.filter { c.activeOn(it) }.map { d ->
         stored[d] ?: run {
             val h = cal.holidayName(d)
             when {
@@ -361,8 +419,12 @@ data class Payslip(
     }
 }
 
-fun calcPayroll(c: Company, s: AppSettings, ym: YearMonth, records: List<DayRecord>, today: LocalDate): Payslip {
+fun calcPayroll(c: Company, s: AppSettings, ym: YearMonth, records: List<DayRecord>, today: LocalDate): Payslip =
+    calcPayroll(c, s, periodOf(c, ym), records, today)
+
+fun calcPayroll(c: Company, s: AppSettings, p: PayPeriod, records: List<DayRecord>, today: LocalDate): Payslip {
     val warn = mutableListOf<String>()
+    val ym = p.label
     val y = ym.year
     val mw = s.minWage(y)
     val hourly = s.hourly(c, y)
@@ -370,30 +432,39 @@ fun calcPayroll(c: Company, s: AppSettings, ym: YearMonth, records: List<DayReco
     if (!HolidayCalendar.covered(y)) warn += "${y}년 공휴일 표가 없습니다. 설정 > 회사 휴무일에 직접 추가하세요"
     if (fullBase < mw * MONTHLY_STD_HOURS) warn += "기본급이 최저임금 월환산(${"%,d".format(mw * MONTHLY_STD_HOURS)}원)보다 낮습니다"
 
-    // 중도 입사/퇴사 → 기본급 일할 계산
-    val days = monthDays(ym)
+    // 중도 입사/퇴사 → 기본급 일할 계산 (달력일수 또는 근무일수)
+    val cal = HolidayCalendar(c)
+    val days = p.days
     val activeDays = days.count { c.activeOn(it) }
     val partial = activeDays < days.size
-    val base = if (partial) (fullBase.toLong() * activeDays / days.size).toInt() else fullBase
-    if (partial) warn += "중도 입사/퇴사: 기본급 ${activeDays}/${days.size}일 일할 계산"
+    val base = if (!partial) fullBase else if (c.prorateBy == "workdays") {
+        val wdAll = days.count { cal.isWorkday(it) }.coerceAtLeast(1)
+        val wdAct = days.count { cal.isWorkday(it) && c.activeOn(it) }
+        warn += "중도 입사/퇴사: 기본급 근무일 ${wdAct}/${wdAll}일 일할 계산"
+        (fullBase.toLong() * wdAct / wdAll).toInt()
+    } else {
+        warn += "중도 입사/퇴사: 기본급 ${activeDays}/${days.size}일 일할 계산"
+        (fullBase.toLong() * activeDays / days.size).toInt()
+    }
 
-    val recs = records.filter { it.companyId == c.id && c.activeOn(it.day) }
+    val recs = records.filter { it.companyId == c.id && c.activeOn(it.day) && p.contains(it.day) }
+    // 연도가 바뀌는 기간(12/21~1/20)도 날짜별 그 해 시급으로 계산
     val ot = recs.sumOf { overtimeMin(c, it) }
-    val otPay = (ot / 60.0 * hourly * c.overtimeRate).toInt()
+    val otPay = recs.sumOf { (overtimeMin(c, it) / 60.0 * s.hourly(c, it.day.year) * c.overtimeRate) }.toInt()
     val hw = recs.sumOf { holidayWorkMin(c, it) }
-    val hwPay = (hw / 60.0 * hourly * s.holidayWorkRate).toInt()
+    val hwPay = recs.sumOf { (holidayWorkMin(c, it) / 60.0 * s.hourly(c, it.day.year) * s.holidayWorkRate) }.toInt()
 
     val absentDays = recs.count { it.status == Status.ABSENT }
-    val bonusBreakers = absentDays + if (s.leaveCountsAsAttendance) 0 else recs.count { it.status == Status.LEAVE }
+    val bonusBreakers = absentDays + if (s.leaveCountsAsAttendance) 0 else recs.count { it.status == Status.LEAVE || it.status == Status.HALF_LEAVE }
     val daily = (hourly * c.scheduledMin() / 60).toInt()
     val absDeduct = if (s.deductAbsence) daily * absentDays else 0
     val early = recs.sumOf { earlyLeaveMin(c, it) }
     val earlyDeduct = if (s.deductEarlyLeave) (early / 60.0 * hourly).toInt() else 0
 
     val (bonus, bstat) = when {
-        partial -> 0 to "중도 입·퇴사"
         bonusBreakers > 0 -> 0 to "결근 있음"
-        !today.isAfter(ym.atEndOfMonth()) -> c.fullAttendanceBonus to "예정"
+        partial && !c.bonusOnPartial -> 0 to "중도 입·퇴사"
+        !today.isAfter(p.end) -> c.fullAttendanceBonus to "예정"
         else -> c.fullAttendanceBonus to "만근"
     }
 
@@ -405,8 +476,12 @@ fun calcPayroll(c: Company, s: AppSettings, ym: YearMonth, records: List<DayReco
     if (y in UNCONFIRMED_INS_YEARS && !s.insOverride.containsKey(y)) warn += "${y}년 건강·장기요양 요율은 고시 전 임시값입니다 (설정에서 수정)"
     val insBase = if (s.insuranceBaseOverride > 0) s.insuranceBaseOverride else taxable
     val pensBase = insBase.coerceIn(s.pensionFloor, s.pensionCap)
-    val pension = floor10(pensBase * r.pension / 100)
-    val health = floor10(insBase * r.health / 100)
+    // 입사월: 1일 입사가 아니면 국민연금·건강보험(장기요양)은 다음 달부터 부과
+    val firstMonthNoIns = p.contains(c.startDate) && c.startDate.dayOfMonth != 1
+    if (firstMonthNoIns) warn += "입사월(${c.startDate}): 국민연금·건강보험은 다음 달부터 부과돼요 (고용보험만 공제)"
+    if (c.endDate != null && p.contains(c.endDate)) warn += "퇴사월: 건강보험은 퇴사 후 정산될 수 있어요"
+    val pension = if (firstMonthNoIns) 0 else floor10(pensBase * r.pension / 100)
+    val health = if (firstMonthNoIns) 0 else floor10(insBase * r.health / 100)
     val ltc = floor10(health * r.ltc / 100)
     val employment = floor10(taxable * r.employment / 100)
 
@@ -418,7 +493,7 @@ fun calcPayroll(c: Company, s: AppSettings, ym: YearMonth, records: List<DayReco
     val ltax = floor10(itax * 0.1)
     val total = pension + health + ltc + employment + itax + ltax
     val need = recs.filter { it.source == Source.NEEDS_CHECK }
-    if (need.isNotEmpty()) warn += "퇴근 확인 필요: " + need.joinToString(", ") { "${it.day.dayOfMonth}일" }
+    if (need.isNotEmpty()) warn += "퇴근 확인 필요: " + need.joinToString(", ") { "${it.day.monthValue}/${it.day.dayOfMonth}" }
 
     return Payslip(ym, c.id, c.name, mw, hourly, base, ot, otPay, hw, hwPay, bonus, bstat, absentDays, absDeduct,
         early, earlyDeduct, gross, nontax, taxable, pension, health, ltc, employment, itax, ltax, total, gross - total, warn)
@@ -432,9 +507,12 @@ data class OtSummary(val todayMin: Int, val weekMin: Int, val monthMin: Int,
 /** 이번 주(월~일)·이번 달·오늘 연장 합계. liveTodayMin은 퇴근 전 실시간 추정치 */
 fun overtimeSummary(c: Company, s: AppSettings, today: LocalDate,
                     recordsByDay: Map<LocalDate, DayRecord>, liveTodayMin: Int = 0): OtSummary {
+    val cal = HolidayCalendar(c)
     fun ot(d: LocalDate): Int {
         val r = recordsByDay[d]
         if (d == today && (r == null || r.checkOut == null)) {
+            // 휴일·결근·연차인 날은 실시간 연장 추정 없음 (휴일근무는 별도 기록으로만 계산)
+            if (!cal.isWorkday(d) || (r != null && r.status != Status.WORK)) return 0
             val u = max(1, c.overtimeUnitMin)
             return liveTodayMin / u * u
         }
@@ -442,14 +520,48 @@ fun overtimeSummary(c: Company, s: AppSettings, today: LocalDate,
     }
     val hourly = s.hourly(c, today.year)
     fun pay(m: Int) = (m / 60.0 * hourly * c.overtimeRate).toInt()
-    val ym = YearMonth.from(today)
+    val period = periodContaining(c, today)
     val monday = today.minusDays((today.dayOfWeek.value - 1).toLong())
     val week = (0L..6L).map { monday.plusDays(it) }.filter { !it.isAfter(today) && c.activeOn(it) }
-    val month = monthDays(ym).filter { !it.isAfter(today) && c.activeOn(it) }
+    val month = period.days.filter { !it.isAfter(today) && c.activeOn(it) }
     val t = ot(today); val w = week.sumOf { ot(it) }; val m = month.sumOf { ot(it) }
-    val cal = HolidayCalendar(c)
-    val wdAll = cal.workdays(ym)
+    val wdAll = period.days.filter { cal.isWorkday(it) && c.activeOn(it) }
     val wdSoFar = wdAll.filter { !it.isAfter(today) }
-    val attended = wdSoFar.count { d -> recordsByDay[d]?.status.let { it == null || it == Status.WORK || (it == Status.LEAVE && s.leaveCountsAsAttendance) } }
+    val attended = wdSoFar.count { d -> recordsByDay[d]?.status.let { it == null || it == Status.WORK || ((it == Status.LEAVE || it == Status.HALF_LEAVE) && s.leaveCountsAsAttendance) } }
     return OtSummary(t, w, m, pay(t), pay(w), pay(m), s.weeklyOvertimeLimitMin, attended, wdSoFar.size, wdAll.size)
+}
+
+// ─────────────────────────── 연차 ───────────────────────────
+data class LeaveSummary(val entitled: Double, val carry: Double, val used: Double, val planned: Double,
+                        val yearStart: LocalDate, val yearEnd: LocalDate, val auto: Boolean, val firstYear: Boolean) {
+    val total get() = entitled + carry
+    val remaining get() = total - used - planned
+}
+
+fun leaveWeight(r: DayRecord) = when (r.status) { Status.LEAVE -> 1.0; Status.HALF_LEAVE -> 0.5; else -> 0.0 }
+
+/** 연차 기간(입사일 또는 1월 1일 기준)과 부여 일수. records = 해당 회사의 그 기간 기록 */
+fun leaveWindow(c: Company, today: LocalDate): Pair<LocalDate, LocalDate> {
+    if (c.leaveBasis == "calendar") return LocalDate.of(today.year, 1, 1) to LocalDate.of(today.year, 12, 31)
+    var start = c.startDate
+    while (!start.plusYears(1).isAfter(today)) start = start.plusYears(1)
+    return start to start.plusYears(1).minusDays(1)
+}
+
+fun leaveSummary(c: Company, today: LocalDate, records: List<DayRecord>): LeaveSummary {
+    val (ws, we) = leaveWindow(c, today)
+    val tenureYears = ChronoUnit.YEARS.between(c.startDate, ws.coerceAtLeast(c.startDate)).toInt()
+    val firstYear = today.isBefore(c.startDate.plusYears(1))
+    val auto = c.annualLeaveDays < 0
+    val entitled = if (!auto) c.annualLeaveDays.toDouble() else if (firstYear) {
+        // 1년 미만: 1개월 개근마다 1일 (최대 11일) — 지난 달 수 기준
+        min(11L, ChronoUnit.MONTHS.between(c.startDate, today)).toDouble()
+    } else {
+        val n = max(1, if (c.leaveBasis == "calendar") ChronoUnit.YEARS.between(c.startDate, ws).toInt().coerceAtLeast(1) else tenureYears)
+        min(25, 15 + (n - 1) / 2).toDouble()
+    }
+    val inWin = records.filter { it.companyId == c.id && !it.day.isBefore(ws) && !it.day.isAfter(we) }
+    val used = inWin.filter { !it.day.isAfter(today) }.sumOf { leaveWeight(it) }
+    val planned = inWin.filter { it.day.isAfter(today) }.sumOf { leaveWeight(it) }
+    return LeaveSummary(entitled, if (firstYear) 0.0 else c.leaveCarryover, used, planned, ws, we, auto, firstYear)
 }

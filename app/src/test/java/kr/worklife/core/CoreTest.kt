@@ -142,6 +142,14 @@ class CoreTest {
     @Test fun warning2027() = assertTrue(calcPayroll(c, s, YearMonth.of(2027, 1), emptyList(), LocalDate.of(2027, 1, 5)).warnings.any { "2027" in it })
 
     // ── 홈 요약
+    @Test fun noLiveOvertimeOnHoliday() {
+        val hol = LocalDate.of(2026, 10, 9) // 한글날
+        val sm = overtimeSummary(c, s, hol, emptyMap(), liveTodayMin = 180)
+        assertEquals(0, sm.todayMin); assertEquals(0, sm.todayPay)
+        val absent = overtimeSummary(c, s, D, mapOf(D to DayRecord(D, 1, Status.LEAVE)), liveTodayMin = 120)
+        assertEquals(0, absent.todayMin)
+    }
+
     @Test fun summary() {
         val recs = mapOf(
             LocalDate.of(2026, 10, 12) to DayRecord(LocalDate.of(2026, 10, 12), 1, Status.WORK, hm("06:00"), hm("16:00")),
@@ -154,5 +162,80 @@ class CoreTest {
         assertEquals(30 + 60 + 120 + 60, sm.monthMin)
         assertEquals(20_640, (120 / 60.0 * 10320).toInt()); assertEquals(sm.weekMin / 60.0 * 10320, sm.weekPay.toDouble(), 1.0)
         assertEquals(8, sm.workdaysSoFar); assertEquals(20, sm.workdaysTotal)
+    }
+
+    // ── 급여 산정기간·급여일
+    @Test fun periodCalendarMonth() {
+        val p = periodOf(c, OCT)
+        assertEquals(LocalDate.of(2026, 10, 1), p.start); assertEquals(LocalDate.of(2026, 10, 31), p.end)
+        assertEquals(LocalDate.of(2026, 11, 10), p.payDate) // 다음 달 10일 (화)
+    }
+    @Test fun period21to20() {
+        val cc = c.copy(periodStartDay = 21, payDay = 25, payMonthOffset = 0)
+        val p = periodOf(cc, OCT)
+        assertEquals(LocalDate.of(2026, 9, 21), p.start); assertEquals(LocalDate.of(2026, 10, 20), p.end)
+        assertEquals(OCT, periodContaining(cc, LocalDate.of(2026, 10, 20)).label)
+        assertEquals(YearMonth.of(2026, 11), periodContaining(cc, LocalDate.of(2026, 10, 21)).label)
+        assertEquals(LocalDate.of(2026, 10, 23), p.payDate) // 10/25 일요일 → 앞당겨 금요일 23일
+        assertEquals(LocalDate.of(2026, 10, 26), periodOf(cc.copy(payAdjust = "after"), OCT).payDate)
+        assertEquals(LocalDate.of(2026, 10, 25), periodOf(cc.copy(payAdjust = "none"), OCT).payDate)
+        // 연말 걸친 기간 12/21~1/20
+        val jan = periodOf(cc, YearMonth.of(2027, 1))
+        assertEquals(LocalDate.of(2026, 12, 21), jan.start); assertEquals(31, jan.days.size)
+    }
+    @Test fun payDayEndOfMonthAndHoliday() {
+        assertEquals(LocalDate.of(2026, 10, 30), periodOf(c.copy(payDay = 0, payMonthOffset = 0), OCT).payDate) // 10/31 토 → 30 금
+        assertEquals(LocalDate.of(2026, 10, 8), periodOf(c.copy(payDay = 9, payMonthOffset = 0), OCT).payDate)  // 한글날 → 8일
+    }
+    @Test fun nextPaydayPicksNearest() {
+        val np = nextPayday(c, D) // 10/14 → 9월분 지급일 10/10(토→10/9 휴일→10/8)은 지났고 10월분 11/10
+        assertEquals(LocalDate.of(2026, 11, 10), np.payDate); assertEquals(OCT, np.label)
+        assertEquals(LocalDate.of(2026, 10, 8), nextPayday(c, LocalDate.of(2026, 10, 8)).payDate)
+    }
+    @Test fun payroll21to20WithOvertime() {
+        val cc = c.copy(periodStartDay = 21)
+        val p = periodOf(cc, OCT)
+        val d = LocalDate.of(2026, 9, 24) // 기간 안 (전월)
+        val recs = buildPeriod(cc, p, mapOf(d to DayRecord(d, 1, Status.WORK, hm("06:00"), hm("17:00"))), NOV1)
+        assertEquals(30, recs.size)
+        assertEquals(20_640, calcPayroll(cc, s, p, recs, NOV1).overtimePay)
+    }
+
+    // ── 중도 입사
+    @Test fun midPeriodHireCalendarAndWorkdays() {
+        val hire = c.copy(startDate = LocalDate.of(2026, 10, 15))
+        val p1 = calcPayroll(hire, s, periodOf(hire, OCT), buildPeriod(hire, periodOf(hire, OCT), emptyMap(), NOV1), NOV1)
+        assertEquals((2_156_880L * 17 / 31).toInt(), p1.base)
+        assertEquals(0, p1.bonus); assertEquals(0, p1.pension); assertEquals(0, p1.health)   // 1일 입사 아님
+        assertTrue(p1.employment > 0)
+        val wd = hire.copy(prorateBy = "workdays") // 10월 근무일 20일 중 15일 이후 12일
+        val p2 = calcPayroll(wd, s, periodOf(wd, OCT), buildPeriod(wd, periodOf(wd, OCT), emptyMap(), NOV1), NOV1)
+        assertEquals((2_156_880L * 12 / 20).toInt(), p2.base)
+        val bon = hire.copy(bonusOnPartial = true)
+        assertEquals(100_000, calcPayroll(bon, s, periodOf(bon, OCT), buildPeriod(bon, periodOf(bon, OCT), emptyMap(), NOV1), NOV1).bonus)
+        val first = c.copy(startDate = LocalDate.of(2026, 10, 1))
+        assertTrue(calcPayroll(first, s, periodOf(first, OCT), emptyList(), NOV1).pension > 0) // 1일 입사는 부과
+    }
+
+    // ── 연차·반차
+    @Test fun leaveAutoAndManual() {
+        val hired = c.copy(startDate = LocalDate.of(2024, 3, 4))
+        val recs = listOf(DayRecord(LocalDate.of(2026, 5, 6), 1, Status.LEAVE), DayRecord(LocalDate.of(2026, 9, 1), 1, Status.HALF_LEAVE),
+            DayRecord(LocalDate.of(2026, 12, 24), 1, Status.LEAVE), DayRecord(LocalDate.of(2026, 1, 2), 1, Status.LEAVE))
+        val ls = leaveSummary(hired, D, recs) // 입사일 기준 2026-03-04~2027-03-03, 근속 2년 → 15일
+        assertEquals(LocalDate.of(2026, 3, 4), ls.yearStart); assertEquals(15.0, ls.entitled, 0.0)
+        assertEquals(1.5, ls.used, 0.0); assertEquals(1.0, ls.planned, 0.0); assertEquals(12.5, ls.remaining, 0.0)
+        val manual = leaveSummary(hired.copy(annualLeaveDays = 18, leaveCarryover = 2.0, leaveBasis = "calendar"), D, recs)
+        assertEquals(LocalDate.of(2026, 1, 1), manual.yearStart); assertEquals(20.0, manual.total, 0.0); assertEquals(2.5, manual.used, 0.0)
+        val newbie = leaveSummary(c.copy(startDate = LocalDate.of(2026, 6, 1)), D, emptyList())
+        assertTrue(newbie.firstYear); assertEquals(4.0, newbie.entitled, 0.0)
+        val senior = leaveSummary(c.copy(startDate = LocalDate.of(2015, 1, 5)), D, emptyList())
+        assertEquals(20.0, senior.entitled, 0.0) // 11년차: 15 + (11-1)/2
+    }
+    @Test fun halfLeaveNoEarlyLeaveNoOvertime() {
+        val r = DayRecord(D, 1, Status.HALF_LEAVE, hm("06:00"), hm("10:00"))
+        assertEquals(0, earlyLeaveMin(c, r)); assertEquals(0, overtimeMin(c, r))
+        val p = calcPayroll(c, s, OCT, buildMonth(c, OCT, mapOf(D to r), NOV1), NOV1)
+        assertEquals(100_000, p.bonus)
     }
 }
