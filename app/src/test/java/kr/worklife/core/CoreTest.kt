@@ -258,8 +258,11 @@ class CoreTest {
         assertNull(learnCheckoutWindow(c, listOf(hm("17:00"), hm("17:10"))))
         val w = learnCheckoutWindow(c, listOf("16:50", "17:00", "17:05", "17:00", "16:55", "17:20", "17:00").map { hm(it) })!!
         assertEquals(hm("16:35"), w.from); assertEquals(hm("17:50"), w.to); assertEquals(7, w.samples)
-        assertEquals(1, pollIntervalMin(hm("17:00"), w)); assertEquals(5, pollIntervalMin(hm("15:30"), w)); assertEquals(5, pollIntervalMin(hm("18:30"), w))
-        assertEquals(5, pollIntervalMin(hm("17:00"), null))
+        assertEquals(10, pollIntervalMin(hm("17:00"), w))                // 기본: 촘촘히 끔 → 10분
+        assertEquals(3, pollIntervalMin(hm("17:00"), w, 10, 3))          // 켜면 학습 시간대 3분
+        assertEquals(10, pollIntervalMin(hm("15:30"), w, 10, 3)); assertEquals(10, pollIntervalMin(hm("18:30"), w, 10, 3))
+        assertEquals(10, pollIntervalMin(hm("17:00"), null, 10, 3))
+        assertEquals(10, AppSettings().pollAfterEndMin); assertEquals(30, AppSettings().holidayPollMin)
         assertEquals(hm("14:55"), trackingStart(c, w))
         val early = learnCheckoutWindow(c, List(6) { hm("14:30") })!!
         assertEquals(hm("14:15"), trackingStart(c, early)); assertEquals(hm("15:00"), early.to)

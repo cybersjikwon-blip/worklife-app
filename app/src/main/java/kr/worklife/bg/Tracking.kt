@@ -118,7 +118,27 @@ object Scheduler {
         }.firstOrNull()
         if (next != null) set(ctx, next, pi(ctx, ACT_TRACK, 1))
         set(ctx, now.toLocalDate().plusDays(1).atTime(0, 10), pi(ctx, ACT_SETTLE, 2))
-        if (shouldTrackNow(ctx)) schedulePoll(ctx, 5)
+        ensure(ctx)
+    }
+
+    fun isHolidayToday(ctx: Context): Boolean {
+        val d = java.time.LocalDate.now()
+        val c = Repo.get(ctx).companyOn(d) ?: return false
+        return !HolidayCalendar(c).isWorkday(d)
+    }
+
+    /**
+     * 감시 상태 맞추기 (모든 경로가 이걸 부름)
+     *  - 감시 불필요: 확인 알람 취소
+     *  - 휴일: 서비스 없이 알람으로만 30분마다 (설정 0이면 지오펜스만)
+     *  - 평일 정시 이후: 서비스(10분 간격) + 같은 간격 백업 알람
+     */
+    fun ensure(ctx: Context) {
+        if (!shouldTrackNow(ctx)) { cancelPoll(ctx); return }
+        val iv = intervalNow(ctx)
+        if (isHolidayToday(ctx)) { if (iv > 0) schedulePoll(ctx, iv) else cancelPoll(ctx); return }
+        startTracking(ctx)
+        schedulePoll(ctx, iv)
     }
 
     fun schedulePoll(ctx: Context, minutes: Int) = set(ctx, LocalDateTime.now().plusMinutes(minutes.toLong()), pi(ctx, ACT_POLL, 3))
@@ -147,13 +167,15 @@ object Scheduler {
         return !t.isBefore(trackingStart(c, learned(ctx, c)))
     }
 
-    /** 지금 위치 확인 간격(분): 학습된 퇴근 시간대면 1분, 그 외 5분 */
+    /** 지금 위치 확인 간격(분): 평일 정시 이후 기본 10분 (학습 시간대 촘촘히 켜면 3분), 휴일 30분(0 = 끔) */
     fun intervalNow(ctx: Context): Int {
         val repo = Repo.get(ctx)
+        val s = repo.settings
         val d = java.time.LocalDate.now()
-        val c = repo.companyOn(d) ?: return 5
-        if (!HolidayCalendar(c).isWorkday(d)) return 2
-        return pollIntervalMin(java.time.LocalTime.now(), learned(ctx, c))
+        val c = repo.companyOn(d) ?: return s.pollAfterEndMin
+        if (!HolidayCalendar(c).isWorkday(d)) return s.holidayPollMin
+        return pollIntervalMin(java.time.LocalTime.now(), learned(ctx, c), s.pollAfterEndMin.coerceAtLeast(1),
+            if (s.fastLearnedWindow) s.fastIntervalMin.coerceAtLeast(1) else null)
     }
 
     fun startTracking(ctx: Context) {
@@ -162,7 +184,7 @@ object Scheduler {
             ContextCompat.startForegroundService(ctx, Intent(ctx, TrackingService::class.java))
         } catch (e: Exception) {
             // 백그라운드 시작 제한 등 → 5분 확인 알람과 지오펜스가 백업
-            Notif.post(ctx, 13, "퇴근 감지를 시작하지 못했어요", "5분마다 위치 확인으로 대신해요. 앱을 한 번 열면 정상으로 돌아와요.")
+            Notif.post(ctx, 13, "퇴근 감지를 시작하지 못했어요", "알람으로 위치를 대신 확인해요. 앱을 한 번 열면 정상으로 돌아와요.")
         }
     }
 }
@@ -206,11 +228,11 @@ class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         Notif.init(ctx)
         when (intent.action) {
-            Scheduler.ACT_TRACK -> if (Scheduler.shouldTrackNow(ctx)) { Scheduler.startTracking(ctx); Scheduler.schedulePoll(ctx, 5) }
+            Scheduler.ACT_TRACK -> Scheduler.ensure(ctx)
             Scheduler.ACT_POLL -> {
                 if (!Scheduler.shouldTrackNow(ctx)) { Scheduler.cancelPoll(ctx); return }
-                // 서비스가 죽었어도 5분마다 직접 위치를 잡아 판정 + 서비스 재시작
-                Scheduler.startTracking(ctx)
+                // 서비스가 죽었어도 알람이 직접 위치를 잡아 판정 (평일은 서비스도 재시작)
+                if (!Scheduler.isHolidayToday(ctx)) Scheduler.startTracking(ctx)
                 val pr = goAsync()
                 val h = Handler(Looper.getMainLooper())
                 var finished = false
@@ -218,7 +240,7 @@ class AlarmReceiver : BroadcastReceiver() {
                 h.postDelayed({ finish() }, 25_000)
                 Geo.current(ctx) { l ->
                     val done = l != null && runCatching { Tracker.onSample(ctx, l) }.getOrDefault(false)
-                    if (!done && Scheduler.shouldTrackNow(ctx)) Scheduler.schedulePoll(ctx, 5) else Scheduler.cancelPoll(ctx)
+                    if (!done) Scheduler.ensure(ctx) else Scheduler.cancelPoll(ctx)
                     finish()
                 }
                 return
@@ -239,7 +261,6 @@ class BootReceiver : BroadcastReceiver() {
         Notif.init(ctx)
         Scheduler.scheduleAll(ctx)
         Geo.register(ctx)
-        if (Scheduler.shouldTrackNow(ctx)) Scheduler.startTracking(ctx)
     }
 }
 
@@ -252,10 +273,9 @@ class GeofenceReceiver : BroadcastReceiver() {
         Notif.init(ctx)
         val done = runCatching { Tracker.onSample(ctx, loc) }.getOrDefault(false)
         if (done) { Scheduler.cancelPoll(ctx); return }
-        if (Scheduler.shouldTrackNow(ctx)) {
-            Scheduler.startTracking(ctx)
-            Scheduler.schedulePoll(ctx, if (ev.geofenceTransition == Geofence.GEOFENCE_TRANSITION_EXIT) 2 else 5)
-        }
+        Scheduler.ensure(ctx)
+        // 회사를 벗어나면 2분 뒤 딱 1번 재확인 → 퇴근 시각을 빨리 확정 (계속 2분마다가 아님)
+        if (ev.geofenceTransition == Geofence.GEOFENCE_TRANSITION_EXIT && Scheduler.shouldTrackNow(ctx)) Scheduler.schedulePoll(ctx, 2)
     }
 }
 
@@ -314,11 +334,11 @@ class TrackingService : Service() {
     }
     private val listener = LocationListener { onLoc(it) }
 
-    /** 1분마다: 감시 계속할지, 확인 간격(학습 시간대 1분/그 외 5분)이 바뀌었는지, 위치가 끊겼는지 점검 */
+    /** 1분마다: 감시 계속할지, 확인 간격(정시 이후 10분 / 학습 시간대 촘촘히 켜면 3분)이 바뀌었는지, 위치가 끊겼는지 점검 */
     private val watchdog = object : Runnable {
         override fun run() {
             val ctx = this@TrackingService
-            if (!Scheduler.shouldTrackNow(ctx)) { stopSelf(); return }
+            if (!Scheduler.shouldTrackNow(ctx) || Scheduler.isHolidayToday(ctx)) { stopSelf(); return }
             val want = Scheduler.intervalNow(ctx)
             if (want != interval) startUpdates(want)
             // 위치가 간격의 2배 넘게 안 들어오면 직접 1회 요청
@@ -340,12 +360,12 @@ class TrackingService : Service() {
         } catch (e: Exception) {
             stopSelf(); return START_NOT_STICKY
         }
-        if (!Scheduler.shouldTrackNow(this)) { stopSelf(); return START_NOT_STICKY }
+        if (!Scheduler.shouldTrackNow(this) || Scheduler.isHolidayToday(this)) { stopSelf(); return START_NOT_STICKY }
         if (interval < 0) {
             lastFix = System.currentTimeMillis()
             startUpdates(Scheduler.intervalNow(this))
         }
-        Scheduler.schedulePoll(this, 5) // 서비스가 죽어도 5분 뒤 알람이 이어받음
+        Scheduler.schedulePoll(this, Scheduler.intervalNow(this).coerceAtLeast(1)) // 서비스가 죽어도 알람이 이어받음
         handler.removeCallbacks(watchdog)
         handler.postDelayed(watchdog, 60_000L)
         return START_STICKY

@@ -3,6 +3,7 @@ package kr.worklife.ui
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -70,7 +71,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun afterReady() {
-        runCatching { if (Scheduler.shouldTrackNow(this)) Scheduler.startTracking(this) }
+        runCatching { Scheduler.ensure(this) }
         runCatching { Updater.autoCheck(this, notify = false) { runOnUiThread { version.intValue++ } } }
         // 앱을 열면 감시 중인 시간이면 즉시 위치 1회 확인 → 홈에 바로 반영
         runCatching { Tracker.oneShot(this) { runOnUiThread { version.intValue++ } } }
@@ -150,4 +151,16 @@ fun AppRoot(version: Int, tab: Int, setTab: (Int) -> Unit, bump: () -> Unit) {
         }
     }
     UpdateDialogHost(bump)
+
+    // 뒤로가기: 다른 탭이면 홈으로, 홈이면 종료 확인
+    var askExit by remember { mutableStateOf(false) }
+    val act = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
+    BackHandler(enabled = true) { if (tab != 0) setTab(0) else askExit = true }
+    if (askExit) AlertDialog(
+        onDismissRequest = { askExit = false },
+        title = { Text("앱을 종료할까요?") },
+        text = { Text("앱을 닫아도 퇴근 감지와 알림은 계속 동작해요.") },
+        confirmButton = { TextButton(onClick = { askExit = false; act?.finish() }) { Text("종료") } },
+        dismissButton = { TextButton(onClick = { askExit = false }) { Text("취소") } },
+    )
 }

@@ -210,6 +210,7 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
             put("cutoff", s.dayCutoff); put("dep", s.dependents); put("child", s.children820); put("ratio", s.withholdingRatio)
             put("nontax", s.nontaxableMonthly); put("insBase", s.insuranceBaseOverride); put("pFloor", s.pensionFloor)
             put("pCap", s.pensionCap); put("itax", s.incomeTaxOverride); put("weekLimit", s.weeklyOvertimeLimitMin)
+            put("pollEnd", s.pollAfterEndMin); put("fastOn", s.fastLearnedWindow); put("fastMin", s.fastIntervalMin); put("holPoll", s.holidayPollMin)
             put("ins", JSONObject().apply {
                 s.insOverride.forEach { (y, r) -> put(y.toString(), JSONArray(listOf(r.pension, r.health, r.ltc, r.employment))) }
             })
@@ -227,7 +228,9 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
                 j.optInt("exitMin", d.exitConfirmMin), j.optInt("exitN", d.exitConfirmSamples), j.optDouble("fast", d.fastExitM),
                 j.optDouble("acc", d.maxAccuracyM), j.optString("cutoff", d.dayCutoff), j.optInt("dep", 1), j.optInt("child", 0),
                 j.optInt("ratio", 100), j.optInt("nontax", 0), j.optInt("insBase", 0), j.optInt("pFloor", d.pensionFloor),
-                j.optInt("pCap", d.pensionCap), ins, j.optInt("itax", -1), j.optInt("weekLimit", d.weeklyOvertimeLimitMin))
+                j.optInt("pCap", d.pensionCap), ins, j.optInt("itax", -1), j.optInt("weekLimit", d.weeklyOvertimeLimitMin),
+                j.optInt("pollEnd", d.pollAfterEndMin), j.optBoolean("fastOn", d.fastLearnedWindow),
+                j.optInt("fastMin", d.fastIntervalMin), j.optInt("holPoll", d.holidayPollMin))
         }
     }
 }

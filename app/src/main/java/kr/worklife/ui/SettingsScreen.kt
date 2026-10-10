@@ -144,8 +144,12 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
         }) { Text("지도에서 확인") }
         val lw = remember(c) { Scheduler.learned(ctx, c) }
         val cnt = remember(c) { runCatching { repo.recentAutoCheckouts(c.id).size }.getOrDefault(0) }
-        Text(if (lw != null) "학습된 퇴근 시간대 ${lw.from.hhmm()}~${lw.to.hhmm()} (최근 ${lw.samples}회): 이 시간엔 1분마다, 그 외엔 정시 이후 5분마다 위치 확인"
-             else "정시 이후 5분마다 위치 확인 · 자동 퇴근이 5회 쌓이면 퇴근 시간대를 학습해 그 시간엔 1분마다 확인해요 (현재 ${cnt}회)",
+        val ps = remember(c) { repo.settings }
+        Text("위치 확인: 정시(${we.hhmm()}) 전에는 회사 출입 알림만 · 정시 이후 ${ps.pollAfterEndMin}분마다 · 휴일 " +
+                (if (ps.holidayPollMin > 0) "${ps.holidayPollMin}분마다" else "출입 알림만") + "\n" +
+                (if (lw != null) "학습된 퇴근 시간대 ${lw.from.hhmm()}~${lw.to.hhmm()} (최근 ${lw.samples}회)" +
+                    (if (ps.fastLearnedWindow) " · 이 시간엔 ${ps.fastIntervalMin}분마다" else "")
+                 else "자동 퇴근이 5회 쌓이면 퇴근 시간대를 학습해요 (현재 ${cnt}회)"),
             fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f))
 
         Text("근무 시간", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
@@ -309,6 +313,9 @@ private fun PersonalForm(bump: () -> Unit) {
     var fast by remember { mutableStateOf(s.fastExitM.toInt().toString()) }
     var acc by remember { mutableStateOf(s.maxAccuracyM.toInt().toString()) }
     var cutoff by remember { mutableStateOf(hm(s.dayCutoff)) }
+    var pollEnd by remember { mutableStateOf(s.pollAfterEndMin) }
+    var fastOn by remember { mutableStateOf(s.fastLearnedWindow) }
+    var holPoll by remember { mutableStateOf(s.holidayPollMin) }
 
     SCard {
         CardTitle("급여·공제 (개인)")
@@ -337,6 +344,17 @@ private fun PersonalForm(bump: () -> Unit) {
         Field("이 거리(m) 이상 멀어지면 즉시 확정", fast, { fast = it }, number = true, hint = "차로 출발하는 경우 (기본 1000)")
         Field("GPS 오차 허용(m)", acc, { acc = it }, number = true, hint = "이보다 부정확한 위치는 버림 (기본 50)")
         OutlinedButton(onClick = { pickTime(ctx, cutoff) { cutoff = it } }) { Text("하루 마감 ${cutoff.hhmm()}") }
+        Text("정시 이후 위치 확인 간격", fontSize = 14.sp, modifier = Modifier.padding(top = 8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf(5, 10, 15, 30).forEach { m -> FilterChip(pollEnd == m, { pollEnd = m }, label = { Text("${m}분") }) }
+        }
+        SwitchRow("학습된 퇴근 시간대엔 3분마다 (배터리 조금 더 씀)", fastOn) { fastOn = it }
+        Text("휴일에 회사에 있을 때 확인", fontSize = 14.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf(0 to "출입 알림만", 30 to "30분", 60 to "60분").forEach { (m, l) -> FilterChip(holPoll == m, { holPoll = m }, label = { Text(l) }) }
+        }
+        Text("정시 전에는 회사 출입 알림(지오펜스)만 써서 배터리를 거의 안 써요. 퇴근이 확정되면 확인을 멈춰요.", fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
 
         Button(onClick = {
             val table = runCatching {
@@ -359,7 +377,8 @@ private fun PersonalForm(bump: () -> Unit) {
                 insuranceBaseOverride = insBase.filter { it.isDigit() }.toIntOrNull() ?: 0,
                 incomeTaxOverride = itax.filter { it.isDigit() }.toIntOrNull() ?: -1, insOverride = insMap,
                 exitConfirmMin = exitMin.toIntOrNull()?.coerceIn(0, 60) ?: 10, fastExitM = fast.toDoubleOrNull()?.coerceIn(200.0, 20000.0) ?: 1000.0,
-                maxAccuracyM = acc.toDoubleOrNull()?.coerceIn(5.0, 500.0) ?: 50.0, dayCutoff = cutoff.hhmm())
+                maxAccuracyM = acc.toDoubleOrNull()?.coerceIn(5.0, 500.0) ?: 50.0, dayCutoff = cutoff.hhmm(),
+                pollAfterEndMin = pollEnd, fastLearnedWindow = fastOn, holidayPollMin = holPoll)
             Toast.makeText(ctx, "저장했어요", Toast.LENGTH_SHORT).show()
             bump()
         }, Modifier.fillMaxWidth().padding(top = 12.dp)) { Text("급여·공제 설정 저장") }

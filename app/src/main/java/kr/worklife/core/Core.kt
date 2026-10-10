@@ -101,6 +101,11 @@ data class AppSettings(
     val insOverride: Map<Int, InsRates> = emptyMap(),
     val incomeTaxOverride: Int = -1,
     val weeklyOvertimeLimitMin: Int = 12 * 60,
+    // 위치 확인 간격
+    val pollAfterEndMin: Int = 10,        // 평일 정시 이후 ~ 퇴근 확정
+    val fastLearnedWindow: Boolean = false, // 학습된 퇴근 시간대에 더 촘촘히
+    val fastIntervalMin: Int = 3,
+    val holidayPollMin: Int = 30,         // 휴일 회사에 있을 때 백업 확인 (0 = 끔, 지오펜스만)
 ) {
     fun minWage(year: Int): Int {
         if (minWageOverride > 0) return minWageOverride
@@ -592,6 +597,6 @@ fun trackingStart(c: Company, w: LearnedWindow?): LocalTime {
     return if (w != null && w.from.isBefore(base)) w.from else base
 }
 
-/** 위치 확인 간격(분): 학습된 퇴근 시간대 안 = 1분, 그 밖 = 5분 (정시 이후 최소 5분마다는 반드시 확인) */
-fun pollIntervalMin(now: LocalTime, w: LearnedWindow?): Int =
-    if (w != null && !now.isBefore(w.from) && !now.isAfter(w.to)) 1 else 5
+/** 위치 확인 간격(분): 기본 base(정시 이후 10분), 학습 시간대 촘촘히 켜면 그 안에서 fast */
+fun pollIntervalMin(now: LocalTime, w: LearnedWindow?, base: Int = 10, fast: Int? = null): Int =
+    if (fast != null && w != null && !now.isBefore(w.from) && !now.isAfter(w.to)) minOf(fast, base) else base
