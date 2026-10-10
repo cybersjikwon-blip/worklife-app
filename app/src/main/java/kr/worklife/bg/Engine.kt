@@ -16,7 +16,7 @@ object Engine {
         if (!c.hasLocation) return Result(null, null, c)
         val locs = repo.locsOf(d)
         if (locs.isEmpty()) return Result(null, null, c)
-        val g = GeofenceTracker(c, repo.settings, d)
+        val g = GeofenceTracker(c, repo.settings, d, holiday = !HolidayCalendar(c).isWorkday(d))
         g.feedAll(locs)
         return Result(null, g, c)
     }
@@ -50,6 +50,24 @@ object Engine {
         return rec
     }
 
+    /** 휴일: 회사에 있다가 나간 게 확정되면 1회 알림 (자동 기록 대신 '휴일근무로 기록' 제안) */
+    fun checkHoliday(ctx: Context, now: LocalDateTime = LocalDateTime.now()): GeofenceTracker? {
+        val d = now.toLocalDate()
+        val (_, g, c) = evaluate(ctx, d)
+        if (g == null || c == null || HolidayCalendar(c).isWorkday(d)) return null
+        val fi = g.firstInside ?: return g
+        val co = g.checkout ?: return g
+        val repo = Repo.get(ctx)
+        val key = "holidayNotified-$d"
+        val p = ctx.getSharedPreferences("worklife", Context.MODE_PRIVATE)
+        if (repo.day(d, c.id) == null && !p.getBoolean(key, false) && java.time.Duration.between(fi, co).toMinutes() >= 30) {
+            p.edit().putBoolean(key, true).apply()
+            Notif.post(ctx, 14, "휴일에 ${c.name}에서 나오셨어요",
+                "${fi.toLocalTime().hhmm()} ~ ${co.toLocalTime().hhmm()} · 근무하셨다면 앱에서 [휴일근무로 기록]을 눌러주세요.")
+        }
+        return g
+    }
+
     /** 오늘이 급여일이면 아침 알림 (자정 마감 알람에서 호출) */
     fun paydayNotice(ctx: Context, today: LocalDate = LocalDate.now()) {
         val repo = Repo.get(ctx)
@@ -65,7 +83,7 @@ object Engine {
     /** 지난 날 중 확정 기록 없이 위치만 있는 날 자동 마감 */
     fun settlePast(ctx: Context, today: LocalDate = LocalDate.now()) {
         val repo = Repo.get(ctx)
-        for (back in 1L..40L) {
+        for (back in 1L..60L) {
             val d = today.minusDays(back)
             val c = repo.companyOn(d) ?: continue
             if (repo.day(d, c.id) != null) continue

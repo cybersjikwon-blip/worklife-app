@@ -72,6 +72,8 @@ class MainActivity : ComponentActivity() {
     private fun afterReady() {
         runCatching { if (Scheduler.shouldTrackNow(this)) Scheduler.startTracking(this) }
         runCatching { Updater.autoCheck(this, notify = false) { runOnUiThread { version.intValue++ } } }
+        // 앱을 열면 감시 중인 시간이면 즉시 위치 1회 확인 → 홈에 바로 반영
+        runCatching { Tracker.oneShot(this) { runOnUiThread { version.intValue++ } } }
         version.intValue++
     }
 

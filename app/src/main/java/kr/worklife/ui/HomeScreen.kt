@@ -68,18 +68,24 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
             Text("위치 권한을 '항상 허용'으로 바꿔 주세요", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.error)
             Text("앱을 닫아도 퇴근을 감지하려면 필요해요. 설정 > 권한 점검", fontSize = 14.sp)
         }
-        // 휴일인데 회사 반경에 오래 머문 경우: 자동 기록 대신 제안
+        // 휴일인데 회사에 머문 경우: 자동 기록 대신 제안 (나간 게 확인되면 그 시각까지)
         val tr = data.tracker
         val fi = tr?.firstInside; val li = tr?.lastInside
-        if (hol != null && data.rec == null && fi != null && li != null && java.time.Duration.between(fi, li).toMinutes() >= 60) SCard {
-            Text("휴일인데 회사에 ${hmShort(java.time.Duration.between(fi, li).toMinutes().toInt())} 계셨어요", fontWeight = FontWeight.SemiBold, color = OtOrange)
-            Text("${fi.toLocalTime().hhmm()} ~ ${li.toLocalTime().hhmm()} · 실제로 일하셨으면 휴일근무로 기록하세요. 회사 위치가 집으로 잡혀 있다면 설정에서 고쳐주세요.", fontSize = 14.sp)
+        val hEnd = tr?.checkout ?: li
+        if (hol != null && data.rec == null && fi != null && hEnd != null && java.time.Duration.between(fi, hEnd).toMinutes() >= 30) SCard {
+            val mins = java.time.Duration.between(fi, hEnd).toMinutes().toInt()
+            val left = tr?.checkout != null
+            Text(if (left) "휴일에 회사에서 ${hmShort(mins)} 계셨어요" else "휴일인데 회사에 계신 것 같아요 (${hmShort(mins)}째)",
+                fontWeight = FontWeight.SemiBold, color = OtOrange)
+            Text("${fi.toLocalTime().hhmm()} ~ " + (if (left) "${hEnd.toLocalTime().hhmm()} 나가심" else "지금 (마지막 확인 ${hEnd.toLocalTime().hhmm()})") +
+                " · 실제로 일하셨으면 휴일근무로 기록하세요. 회사 위치가 집으로 잡혀 있다면 설정에서 고쳐주세요.", fontSize = 14.sp)
             Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilledTonalButton(onClick = {
+                    val endT = if (left) hEnd.toLocalTime() else LocalTime.now()
                     repo.saveDay(DayRecord(today, c.id, Status.HOLIDAY_WORK, fi.toLocalTime().withSecond(0).withNano(0),
-                        li.toLocalTime().withSecond(0).withNano(0), Source.MANUAL, "휴일근무"))
+                        endT.withSecond(0).withNano(0), Source.MANUAL, "휴일근무"))
                     bump()
-                }) { Text("휴일근무로 기록") }
+                }) { Text(if (left) "휴일근무로 기록" else "지금까지 휴일근무로 기록") }
                 OutlinedButton(onClick = goSettings) { Text("회사 위치 확인") }
             }
         }

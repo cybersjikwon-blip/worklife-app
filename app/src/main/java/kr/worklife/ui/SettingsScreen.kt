@@ -142,6 +142,11 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
         if (lat.toDoubleOrNull() != null && lon.toDoubleOrNull() != null) TextButton(onClick = {
             runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:$lat,$lon?q=$lat,$lon(${Uri.encode(name)})"))) }
         }) { Text("지도에서 확인") }
+        val lw = remember(c) { Scheduler.learned(ctx, c) }
+        val cnt = remember(c) { runCatching { repo.recentAutoCheckouts(c.id).size }.getOrDefault(0) }
+        Text(if (lw != null) "학습된 퇴근 시간대 ${lw.from.hhmm()}~${lw.to.hhmm()} (최근 ${lw.samples}회): 이 시간엔 1분마다, 그 외엔 정시 이후 5분마다 위치 확인"
+             else "정시 이후 5분마다 위치 확인 · 자동 퇴근이 5회 쌓이면 퇴근 시간대를 학습해 그 시간엔 1분마다 확인해요 (현재 ${cnt}회)",
+            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f))
 
         Text("근무 시간", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -211,8 +216,8 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
         }
         Field("작년에서 이월된 연차 (일)", carry, { carry = it }, number = true, hint = "없으면 비워두세요 · 반일은 0.5")
 
-        Button(onClick = {
-            val err = mutableListOf<String>()
+        /** 입력값 → 새 회사 설정. 오류가 있으면 err에 담음 */
+        fun build(err: MutableList<String>): Company {
             val la = lat.toDoubleOrNull(); val lo = lon.toDoubleOrNull()
             if ((lat.isNotBlank() || lon.isNotBlank()) && (la == null || lo == null || la !in -90.0..90.0 || lo !in -180.0..180.0)) err += "위도/경도"
             fun dates(s: String) = s.split(",", " ", "\n").map { it.trim() }.filter { it.isNotEmpty() }
@@ -227,8 +232,7 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
             val others = repo.companies.filter { it.id != c.id }
             if (others.any { o -> !start.isAfter(o.endDate ?: LocalDate.MAX) && !(end ?: LocalDate.MAX).isBefore(o.startDate) })
                 err += "다른 회사와 재직기간 겹침"
-            if (err.isNotEmpty()) { Toast.makeText(ctx, "확인 필요: " + err.joinToString(", "), Toast.LENGTH_LONG).show(); return@Button }
-            repo.saveCompany(c.copy(
+            return c.copy(
                 name = name.trim(), startDate = start, endDate = end, lat = la ?: 0.0, lon = lo ?: 0.0,
                 radiusM = (radius.toDoubleOrNull() ?: 100.0).coerceIn(50.0, 2000.0),
                 workStart = ws.hhmm(), workEnd = we.hhmm(), lunchMin = lunch.toIntOrNull()?.coerceIn(0, 240) ?: 60,
@@ -240,12 +244,45 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
                 payDay = if (payLast) 0 else payDay.toIntOrNull()?.coerceIn(1, 31) ?: 10,
                 payMonthOffset = payOff, payAdjust = payAdj, prorateBy = prorate, bonusOnPartial = bonusPartial,
                 annualLeaveDays = if (leaveAuto) -1 else leaveDays.toIntOrNull()?.coerceIn(0, 60) ?: 15,
-                leaveBasis = leaveBasis, leaveCarryover = carry.toDoubleOrNull()?.coerceIn(0.0, 60.0) ?: 0.0))
+                leaveBasis = leaveBasis, leaveCarryover = carry.toDoubleOrNull()?.coerceIn(0.0, 60.0) ?: 0.0)
+        }
+
+        /** 저장 + 근무시간·휴일이 바뀌었으면 근무기록을 새 기준으로 다시 맞춤 */
+        fun save(auto: Boolean): Boolean {
+            val err = mutableListOf<String>()
+            val nc = build(err)
+            if (err.isNotEmpty()) {
+                Toast.makeText(ctx, (if (auto) "설정이 저장되지 않았어요 · " else "확인 필요: ") + err.joinToString(", "), Toast.LENGTH_LONG).show()
+                return false
+            }
+            // 이미 저장된 값과 같으면 아무것도 안 함 (중복 저장·중복 안내 방지)
+            val cur = repo.companies.firstOrNull { it.id == c.id } ?: c
+            if (nc == cur) return true
+            repo.saveCompany(nc)
+            val scheduleChanged = nc.workStart != cur.workStart || nc.workEnd != cur.workEnd || nc.lunchMin != cur.lunchMin ||
+                nc.weekendDays != cur.weekendDays || nc.extraHolidays != cur.extraHolidays || nc.extraWorkdays != cur.extraWorkdays ||
+                nc.lat != cur.lat || nc.lon != cur.lon || nc.radiusM != cur.radiusM
+            var fixed = 0
+            if (scheduleChanged) {
+                fixed = runCatching { repo.reapplyCompany(nc) }.getOrDefault(0)
+                runCatching { Engine.settlePast(ctx); Engine.checkToday(ctx) }
+            }
             repo.onboarded = true
             Scheduler.scheduleAll(ctx); Geo.register(ctx)
-            Toast.makeText(ctx, "저장했어요", Toast.LENGTH_SHORT).show()
+            Toast.makeText(ctx, (if (auto) "변경한 설정을 자동 저장했어요" else "저장했어요") +
+                (if (fixed > 0) " · 근무기록 ${fixed}일을 새 기준으로 다시 맞췄어요" else ""), Toast.LENGTH_LONG).show()
             bump()
-        }, Modifier.fillMaxWidth().padding(top = 12.dp)) { Text("회사 설정 저장") }
+            return true
+        }
+
+        val dirty = runCatching { build(mutableListOf()) != c }.getOrDefault(true)
+        // 저장 안 하고 다른 탭으로 가면 자동 저장 (근무시간만 바꾸고 저장을 깜빡하는 경우 대비)
+        val latestSave = rememberUpdatedState({ if (dirty) save(auto = true) })
+        DisposableEffect(Unit) { onDispose { latestSave.value() } }
+
+        if (dirty) Text("저장하지 않은 변경이 있어요 (다른 탭으로 가면 자동 저장)", fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.tertiary, modifier = Modifier.padding(top = 12.dp))
+        Button(onClick = { save(auto = false) }, Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("회사 설정 저장") }
     }
 }
 

@@ -85,6 +85,34 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
 
     fun period(p: PayPeriod, companyId: Long) = range(p.start, p.end, companyId)
 
+    /** 퇴근 시간대 학습용: 최근 n일 자동 퇴근 시각 (근무일·자동 기록만) */
+    fun recentAutoCheckouts(companyId: Long, days: Long = 60): List<LocalTime> =
+        range(LocalDate.now().minusDays(days), LocalDate.now(), companyId).values
+            .filter { it.status == Status.WORK && it.source == Source.AUTO && it.checkOut != null }.map { it.checkOut!! }
+
+    fun hasLocs(d: LocalDate): Boolean =
+        readableDatabase.rawQuery("SELECT 1 FROM locs WHERE ts LIKE ? LIMIT 1", arrayOf("$d%")).use { it.moveToFirst() }
+
+    /**
+     * 근무시간·휴일 설정이 바뀌면 자동으로 만든 기록을 새 기준으로 다시 맞춤 (직접 입력한 기록은 그대로)
+     *  - 위치 기록이 남아있는 날: 지우고 새 기준으로 재판정 (Engine.settlePast)
+     *  - 위치 기록이 없는 날: 출근시각은 새 값, '기본' 기록은 퇴근도 새 값, 자동 퇴근 시각은 실제 시각이라 유지
+     *  - 새 기준에서 휴일이 된 날: 자동 기록 삭제
+     */
+    fun reapplyCompany(c: Company): Int {
+        val cal = HolidayCalendar(c)
+        var n = 0
+        val all = queryDays("company=?", arrayOf(c.id.toString()))
+        for (r in all) {
+            if (r.source == Source.MANUAL) continue
+            if (r.status != Status.WORK && r.status != Status.HOLIDAY_WORK) continue
+            n++
+            if (!cal.isWorkday(r.day) || hasLocs(r.day)) { deleteDay(r.day, c.id); continue }
+            saveDay(r.copy(checkIn = hm(c.workStart), checkOut = if (r.source == Source.DEFAULT) hm(c.workEnd) else r.checkOut))
+        }
+        return n
+    }
+
     fun firstRecordMonth(): YearMonth? = readableDatabase.rawQuery("SELECT MIN(day) FROM days", null).use {
         if (it.moveToFirst() && !it.isNull(0)) YearMonth.from(LocalDate.parse(it.getString(0))) else null
     }

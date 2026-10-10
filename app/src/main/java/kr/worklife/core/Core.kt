@@ -167,7 +167,10 @@ fun offsetPoint(lat: Double, lon: Double, northM: Double = 0.0, eastM: Double = 
  *  - 다시 들어오면 취소, 정시 전 이탈은 퇴근 아님(메모만)
  *  - 오차 큰 샘플/경계의 애매한 샘플 무시
  */
-class GeofenceTracker(private val c: Company, private val s: AppSettings, val day: LocalDate) {
+/**
+ * holiday = true(휴일 모드): 정규 퇴근시각과 무관하게 '회사에 있다가 나가면' 바로 그 시각을 퇴근으로 확정
+ */
+class GeofenceTracker(private val c: Company, private val s: AppSettings, val day: LocalDate, val holiday: Boolean = false) {
     val endDt: LocalDateTime = day.atTime(hm(c.workEnd))
     var firstInside: LocalDateTime? = null; private set
     var lastInside: LocalDateTime? = null; private set
@@ -206,8 +209,9 @@ class GeofenceTracker(private val c: Company, private val s: AppSettings, val da
         outCount++
         val away = ChronoUnit.SECONDS.between(outSince, smp.ts) / 60.0
         val far = distance(smp) >= s.fastExitM
-        if (!smp.ts.isBefore(endDt) && outCount >= s.exitConfirmSamples && (away >= s.exitConfirmMin || far)) {
+        if ((holiday || !smp.ts.isBefore(endDt)) && outCount >= s.exitConfirmSamples && (away >= s.exitConfirmMin || far)) {
             var co = li
+            if (holiday) { checkout = co; return checkout }
             if (co.isBefore(endDt)) {
                 if (ChronoUnit.MINUTES.between(co, endDt) > s.exitConfirmMin) notes += "정시 전 이탈 의심 (마지막 사업장 확인 ${co.toLocalTime().hhmm()})"
                 else co = endDt
@@ -226,6 +230,7 @@ class GeofenceTracker(private val c: Company, private val s: AppSettings, val da
     fun finalize(): Pair<LocalDateTime, Source> {
         checkout?.let { return it to Source.AUTO }
         val li = lastInside ?: run { notes += "위치 기록 없음 → 정시 퇴근 처리"; return endDt to Source.DEFAULT }
+        if (holiday) return li to (if (outSince != null) Source.AUTO else Source.NEEDS_CHECK)
         if (outSince != null) {
             if (!li.isBefore(endDt)) return li to Source.AUTO
             if (ChronoUnit.MINUTES.between(li, endDt) <= s.exitConfirmMin) return endDt to Source.AUTO
@@ -565,3 +570,28 @@ fun leaveSummary(c: Company, today: LocalDate, records: List<DayRecord>): LeaveS
     val planned = inWin.filter { it.day.isAfter(today) }.sumOf { leaveWeight(it) }
     return LeaveSummary(entitled, if (firstYear) 0.0 else c.leaveCarryover, used, planned, ws, we, auto, firstYear)
 }
+
+// ─────────────────────────── 퇴근 시간대 학습 ───────────────────────────
+/** 최근 자동 퇴근 기록에서 '자주 퇴근하는 시간대'를 학습. 5회 미만이면 null */
+data class LearnedWindow(val from: LocalTime, val to: LocalTime, val samples: Int)
+
+fun learnCheckoutWindow(c: Company, checkouts: List<LocalTime>): LearnedWindow? {
+    if (checkouts.size < 5) return null
+    val m = checkouts.map { it.minOfDay() }.sorted()
+    val p10 = m[(m.size * 0.1).toInt().coerceIn(0, m.size - 1)]
+    val p90 = m[(m.size * 0.9).toInt().coerceIn(0, m.size - 1)]
+    val end = hm(c.workEnd).minOfDay()
+    val from = (p10 - 15).coerceIn(0, 23 * 60 + 59)
+    val to = maxOf(p90 + 30, end).coerceIn(0, 23 * 60 + 59)
+    return LearnedWindow(LocalTime.of(from / 60, from % 60), LocalTime.of(to / 60, to % 60), m.size)
+}
+
+/** 감시 시작 시각: 정시-5분, 학습상 그보다 일찍 나가는 편이면 그만큼 앞당김 */
+fun trackingStart(c: Company, w: LearnedWindow?): LocalTime {
+    val base = hm(c.workEnd).minusMinutes(5)
+    return if (w != null && w.from.isBefore(base)) w.from else base
+}
+
+/** 위치 확인 간격(분): 학습된 퇴근 시간대 안 = 1분, 그 밖 = 5분 (정시 이후 최소 5분마다는 반드시 확인) */
+fun pollIntervalMin(now: LocalTime, w: LearnedWindow?): Int =
+    if (w != null && !now.isBefore(w.from) && !now.isAfter(w.to)) 1 else 5

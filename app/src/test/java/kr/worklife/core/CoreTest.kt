@@ -238,4 +238,30 @@ class CoreTest {
         val p = calcPayroll(c, s, OCT, buildMonth(c, OCT, mapOf(D to r), NOV1), NOV1)
         assertEquals(100_000, p.bonus)
     }
+
+    // ── 휴일 모드 퇴근 판정 (토요일 12:54 퇴근이 감지 안 되던 버그)
+    @Test fun holidayCheckoutBeforeWorkEnd() {
+        val sat = LocalDate.of(2026, 10, 10)
+        fun s2(t: String, dist: Double): LocSample { val (la, lo) = offsetPoint(WL.first, WL.second, dist); return LocSample(sat.atTime(hm(t)), la, lo) }
+        val g = GeofenceTracker(c, s, sat, holiday = true)
+        g.feedAll(listOf(s2("06:51", 20.0), s2("12:54", 20.0), s2("12:58", 600.0), s2("13:01", 2000.0)))
+        assertEquals(sat.atTime(12, 54), g.checkout)
+        val normal = GeofenceTracker(c, s, sat) // 기존 방식이면 15시 전이라 미확정
+        normal.feedAll(listOf(s2("06:51", 20.0), s2("12:54", 20.0), s2("12:58", 600.0), s2("13:01", 2000.0)))
+        assertNull(normal.checkout)
+        val still = GeofenceTracker(c, s, sat, holiday = true); still.feedAll(listOf(s2("06:51", 20.0), s2("12:54", 20.0)))
+        assertEquals(sat.atTime(12, 54) to Source.NEEDS_CHECK, still.finalize())
+    }
+
+    // ── 퇴근 시간대 학습
+    @Test fun learning() {
+        assertNull(learnCheckoutWindow(c, listOf(hm("17:00"), hm("17:10"))))
+        val w = learnCheckoutWindow(c, listOf("16:50", "17:00", "17:05", "17:00", "16:55", "17:20", "17:00").map { hm(it) })!!
+        assertEquals(hm("16:35"), w.from); assertEquals(hm("17:50"), w.to); assertEquals(7, w.samples)
+        assertEquals(1, pollIntervalMin(hm("17:00"), w)); assertEquals(5, pollIntervalMin(hm("15:30"), w)); assertEquals(5, pollIntervalMin(hm("18:30"), w))
+        assertEquals(5, pollIntervalMin(hm("17:00"), null))
+        assertEquals(hm("14:55"), trackingStart(c, w))
+        val early = learnCheckoutWindow(c, List(6) { hm("14:30") })!!
+        assertEquals(hm("14:15"), trackingStart(c, early)); assertEquals(hm("15:00"), early.to)
+    }
 }

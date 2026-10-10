@@ -84,6 +84,7 @@ object Notif {
 object Scheduler {
     const val ACT_TRACK = "kr.worklife.TRACK"
     const val ACT_SETTLE = "kr.worklife.SETTLE"
+    const val ACT_POLL = "kr.worklife.POLL"
 
     private fun pi(ctx: Context, act: String, code: Int) = PendingIntent.getBroadcast(ctx, code,
         Intent(ctx, AlarmReceiver::class.java).setAction(act), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -102,30 +103,57 @@ object Scheduler {
         }
     }
 
-    /** 다음 근무일 (정시-5분) 감지 시작 + 매일 00:10 하루 마감 */
+    /** 학습된 퇴근 시간대 (자동 퇴근 5회 이상 쌓이면) */
+    fun learned(ctx: Context, c: Company): LearnedWindow? =
+        runCatching { learnCheckoutWindow(c, Repo.get(ctx).recentAutoCheckouts(c.id)) }.getOrNull()
+
+    /** 다음 근무일 감시 시작(정시-5분, 학습상 더 일찍 나가면 앞당김) + 매일 00:10 마감 + 지금 감시 중이면 5분 확인 알람 */
     fun scheduleAll(ctx: Context) {
         val repo = Repo.get(ctx)
         val now = LocalDateTime.now()
         val next = (0L..21L).asSequence().map { now.toLocalDate().plusDays(it) }.mapNotNull { d ->
             val c = repo.companyOn(d) ?: return@mapNotNull null
             if (!c.hasLocation || !HolidayCalendar(c).isWorkday(d)) return@mapNotNull null
-            d.atTime(hm(c.workEnd)).minusMinutes(5).takeIf { it.isAfter(now) }
+            d.atTime(trackingStart(c, learned(ctx, c))).takeIf { it.isAfter(now) }
         }.firstOrNull()
         if (next != null) set(ctx, next, pi(ctx, ACT_TRACK, 1))
         set(ctx, now.toLocalDate().plusDays(1).atTime(0, 10), pi(ctx, ACT_SETTLE, 2))
+        if (shouldTrackNow(ctx)) schedulePoll(ctx, 5)
     }
 
-    /** 지금 감지해야 하는 시간인가? (근무일, 정시-5분 ~ 마감, 아직 퇴근 기록 없음) */
+    fun schedulePoll(ctx: Context, minutes: Int) = set(ctx, LocalDateTime.now().plusMinutes(minutes.toLong()), pi(ctx, ACT_POLL, 3))
+    fun cancelPoll(ctx: Context) = runCatching { ctx.getSystemService(AlarmManager::class.java).cancel(pi(ctx, ACT_POLL, 3)) }
+
+    /**
+     * 지금 위치를 감시해야 하나?
+     *  - 근무일: 감시 시작시각 ~ 하루 마감, 아직 퇴근 기록 없음
+     *  - 휴일: 오늘 회사 반경에 들어온 적 있고 아직 나간 게 확정 안 됨
+     */
     fun shouldTrackNow(ctx: Context): Boolean {
         val repo = Repo.get(ctx)
         val now = LocalDateTime.now()
         val d = now.toLocalDate()
         val c = repo.companyOn(d) ?: return false
-        if (!c.hasLocation || !HolidayCalendar(c).isWorkday(d)) return false
+        if (!c.hasLocation) return false
+        val t = now.toLocalTime()
+        if (!t.isBefore(hm(repo.settings.dayCutoff))) return false
+        if (!HolidayCalendar(c).isWorkday(d)) {
+            if (repo.day(d, c.id) != null) return false
+            val g = Engine.evaluate(ctx, d).tracker ?: return false
+            return g.firstInside != null && g.checkout == null
+        }
         val r = repo.day(d, c.id)
         if (r != null && (r.status != Status.WORK || r.checkOut != null)) return false
-        val t = now.toLocalTime()
-        return !t.isBefore(hm(c.workEnd).minusMinutes(5)) && t.isBefore(hm(repo.settings.dayCutoff))
+        return !t.isBefore(trackingStart(c, learned(ctx, c)))
+    }
+
+    /** 지금 위치 확인 간격(분): 학습된 퇴근 시간대면 1분, 그 외 5분 */
+    fun intervalNow(ctx: Context): Int {
+        val repo = Repo.get(ctx)
+        val d = java.time.LocalDate.now()
+        val c = repo.companyOn(d) ?: return 5
+        if (!HolidayCalendar(c).isWorkday(d)) return 2
+        return pollIntervalMin(java.time.LocalTime.now(), learned(ctx, c))
     }
 
     fun startTracking(ctx: Context) {
@@ -133,9 +161,44 @@ object Scheduler {
         try {
             ContextCompat.startForegroundService(ctx, Intent(ctx, TrackingService::class.java))
         } catch (e: Exception) {
-            // 안드로이드 12+ 백그라운드 시작 제한 등 → 지오펜스가 백업, 사용자에게 안내
-            Notif.post(ctx, 13, "퇴근 감지를 시작하지 못했어요", "탭해서 앱을 한 번 열어주세요. (정확한 알람·배터리 예외 설정을 확인하세요)")
+            // 백그라운드 시작 제한 등 → 5분 확인 알람과 지오펜스가 백업
+            Notif.post(ctx, 13, "퇴근 감지를 시작하지 못했어요", "5분마다 위치 확인으로 대신해요. 앱을 한 번 열면 정상으로 돌아와요.")
         }
+    }
+}
+
+/** 위치 1건 처리 공통 경로 (서비스·알람·지오펜스·앱 실행 모두 이걸 사용). 퇴근 확정되면 true */
+object Tracker {
+    fun onSample(ctx: Context, l: Location): Boolean {
+        val repo = Repo.get(ctx)
+        val smp = l.toSample()
+        repo.addLoc(smp)
+        val d = smp.ts.toLocalDate()
+        val rec = Engine.checkToday(ctx)
+        if (rec?.checkOut != null) {
+            if (rec.source != Source.MANUAL) notifyOnce(ctx, rec)
+            return true
+        }
+        val g = Engine.checkHoliday(ctx)
+        if (g?.checkout != null) return true
+        val c = repo.companyOn(d) ?: return true
+        return !c.hasLocation
+    }
+
+    private fun notifyOnce(ctx: Context, rec: DayRecord) {
+        val p = ctx.getSharedPreferences("worklife", Context.MODE_PRIVATE)
+        val key = "checkoutNotified-${rec.day}"
+        val v = rec.checkOut?.hhmm() ?: return
+        if (p.getString(key, null) == v) return
+        p.edit().putString(key, v).apply()
+        val repo = Repo.get(ctx)
+        repo.companies.firstOrNull { it.id == rec.companyId }?.let { Notif.checkout(ctx, rec, it, repo.settings) }
+    }
+
+    /** 앱을 열었을 때 등: 즉시 1회 위치 확인 */
+    fun oneShot(ctx: Context, done: () -> Unit = {}) {
+        if (!Scheduler.shouldTrackNow(ctx)) { done(); return }
+        Geo.current(ctx) { l -> if (l != null) runCatching { onSample(ctx, l) }; done() }
     }
 }
 
@@ -143,7 +206,23 @@ class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         Notif.init(ctx)
         when (intent.action) {
-            Scheduler.ACT_TRACK -> if (Scheduler.shouldTrackNow(ctx)) Scheduler.startTracking(ctx)
+            Scheduler.ACT_TRACK -> if (Scheduler.shouldTrackNow(ctx)) { Scheduler.startTracking(ctx); Scheduler.schedulePoll(ctx, 5) }
+            Scheduler.ACT_POLL -> {
+                if (!Scheduler.shouldTrackNow(ctx)) { Scheduler.cancelPoll(ctx); return }
+                // 서비스가 죽었어도 5분마다 직접 위치를 잡아 판정 + 서비스 재시작
+                Scheduler.startTracking(ctx)
+                val pr = goAsync()
+                val h = Handler(Looper.getMainLooper())
+                var finished = false
+                fun finish() { if (!finished) { finished = true; runCatching { pr.finish() } } }
+                h.postDelayed({ finish() }, 25_000)
+                Geo.current(ctx) { l ->
+                    val done = l != null && runCatching { Tracker.onSample(ctx, l) }.getOrDefault(false)
+                    if (!done && Scheduler.shouldTrackNow(ctx)) Scheduler.schedulePoll(ctx, 5) else Scheduler.cancelPoll(ctx)
+                    finish()
+                }
+                return
+            }
             Scheduler.ACT_SETTLE -> {
                 Engine.settlePast(ctx)
                 runCatching { Engine.paydayNotice(ctx) }
@@ -164,19 +243,19 @@ class BootReceiver : BroadcastReceiver() {
     }
 }
 
-/** 지오펜스(백업 경로): 서비스가 못 떠도 OS가 출입 이벤트를 준다 */
+/** 지오펜스: 서비스가 못 떠도 OS가 출입 이벤트를 준다. 들어오면(휴일 포함) 감시 시작, 나가면 2분 뒤 재확인 */
 class GeofenceReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         val ev = GeofencingEvent.fromIntent(intent) ?: return
         if (ev.hasError()) return
         val loc = ev.triggeringLocation ?: return
         Notif.init(ctx)
-        val repo = Repo.get(ctx)
-        repo.addLoc(loc.toSample())
-        val c = repo.companyOn(loc.toSample().ts.toLocalDate()) ?: return
-        val rec = Engine.checkToday(ctx)
-        if (rec?.checkOut != null && rec.source != Source.MANUAL) Notif.checkout(ctx, rec, c, repo.settings)
-        else if (ev.geofenceTransition == Geofence.GEOFENCE_TRANSITION_EXIT && Scheduler.shouldTrackNow(ctx)) Scheduler.startTracking(ctx)
+        val done = runCatching { Tracker.onSample(ctx, loc) }.getOrDefault(false)
+        if (done) { Scheduler.cancelPoll(ctx); return }
+        if (Scheduler.shouldTrackNow(ctx)) {
+            Scheduler.startTracking(ctx)
+            Scheduler.schedulePoll(ctx, if (ev.geofenceTransition == Geofence.GEOFENCE_TRANSITION_EXIT) 2 else 5)
+        }
     }
 }
 
@@ -227,16 +306,26 @@ class TrackingService : Service() {
     private var fused: FusedLocationProviderClient? = null
     private var lm: LocationManager? = null
     private val handler = Handler(Looper.getMainLooper())
+    private var interval = -1
+    private var lastFix = 0L
 
     private val callback = object : LocationCallback() {
         override fun onLocationResult(r: LocationResult) { r.locations.forEach { onLoc(it) } }
     }
     private val listener = LocationListener { onLoc(it) }
+
+    /** 1분마다: 감시 계속할지, 확인 간격(학습 시간대 1분/그 외 5분)이 바뀌었는지, 위치가 끊겼는지 점검 */
     private val watchdog = object : Runnable {
         override fun run() {
-            val rec = Engine.checkToday(this@TrackingService)
-            if (rec?.checkOut != null || !Scheduler.shouldTrackNow(this@TrackingService)) { finishWith(rec); return }
-            handler.postDelayed(this, 10 * 60_000L)
+            val ctx = this@TrackingService
+            if (!Scheduler.shouldTrackNow(ctx)) { stopSelf(); return }
+            val want = Scheduler.intervalNow(ctx)
+            if (want != interval) startUpdates(want)
+            // 위치가 간격의 2배 넘게 안 들어오면 직접 1회 요청
+            if (System.currentTimeMillis() - lastFix > want * 2 * 60_000L) {
+                Geo.current(ctx) { l -> if (l != null) onLoc(l) }
+            }
+            handler.postDelayed(this, 60_000L)
         }
     }
 
@@ -252,19 +341,27 @@ class TrackingService : Service() {
             stopSelf(); return START_NOT_STICKY
         }
         if (!Scheduler.shouldTrackNow(this)) { stopSelf(); return START_NOT_STICKY }
-        startUpdates()
+        if (interval < 0) {
+            lastFix = System.currentTimeMillis()
+            startUpdates(Scheduler.intervalNow(this))
+        }
+        Scheduler.schedulePoll(this, 5) // 서비스가 죽어도 5분 뒤 알람이 이어받음
         handler.removeCallbacks(watchdog)
-        handler.postDelayed(watchdog, 10 * 60_000L)
+        handler.postDelayed(watchdog, 60_000L)
         return START_STICKY
     }
 
     @SuppressLint("MissingPermission")
-    private fun startUpdates() {
+    private fun startUpdates(minutes: Int) {
         if (!hasFineLoc()) { stopSelf(); return }
+        interval = minutes
+        val ms = minutes * 60_000L
+        runCatching { fused?.removeLocationUpdates(callback) }
+        runCatching { lm?.removeUpdates(listener) }
         try {
             fused = LocationServices.getFusedLocationProviderClient(this).also {
-                val req = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 60_000L)
-                    .setMinUpdateIntervalMillis(30_000L).build()
+                val req = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, ms)
+                    .setMinUpdateIntervalMillis(ms / 2).build()
                 it.requestLocationUpdates(req, callback, Looper.getMainLooper())
             }
         } catch (_: Exception) {
@@ -274,30 +371,22 @@ class TrackingService : Service() {
         try {
             lm = getSystemService(LocationManager::class.java).also {
                 if (it.isProviderEnabled(LocationManager.GPS_PROVIDER))
-                    it.requestLocationUpdates(LocationManager.GPS_PROVIDER, 60_000L, 0f, listener, Looper.getMainLooper())
+                    it.requestLocationUpdates(LocationManager.GPS_PROVIDER, ms, 0f, listener, Looper.getMainLooper())
                 if (fused == null && it.isProviderEnabled(LocationManager.NETWORK_PROVIDER))
-                    it.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 60_000L, 0f, listener, Looper.getMainLooper())
+                    it.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, ms, 0f, listener, Looper.getMainLooper())
             }
         } catch (_: Exception) { }
     }
 
     private fun onLoc(l: Location) {
-        val repo = Repo.get(this)
-        repo.addLoc(l.toSample())
-        val rec = Engine.checkToday(this)
-        if (rec?.checkOut != null) { finishWith(rec); return }
-        val c = repo.currentCompany()
+        lastFix = System.currentTimeMillis()
+        val done = runCatching { Tracker.onSample(this, l) }.getOrDefault(false)
+        if (done) { Scheduler.cancelPoll(this); stopSelf(); return }
+        val c = Repo.get(this).currentCompany()
         val dist = haversineM(c.lat, c.lon, l.latitude, l.longitude).toInt()
-        getSystemService(NotificationManager::class.java)
-            .notify(1, Notif.tracking(this, "${c.name}에서 ${dist}m · 오차 ${l.accuracy.toInt()}m"))
-    }
-
-    private fun finishWith(rec: DayRecord?) {
-        val repo = Repo.get(this)
-        if (rec?.checkOut != null && rec.source != Source.MANUAL) {
-            repo.companies.firstOrNull { it.id == rec.companyId }?.let { Notif.checkout(this, rec, it, repo.settings) }
-        }
-        stopSelf()
+        val hol = !HolidayCalendar(c).isWorkday(java.time.LocalDate.now())
+        getSystemService(NotificationManager::class.java).notify(1, Notif.tracking(this,
+            (if (hol) "휴일 · " else "") + "${c.name}에서 ${dist}m · ${interval}분마다 확인 · ${java.time.LocalTime.now().hhmm()}"))
     }
 
     override fun onDestroy() {
