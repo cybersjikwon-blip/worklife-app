@@ -44,7 +44,7 @@ object Engine {
             // 마감 시각 지남 → 강제 마감
             if (now.toLocalTime().isAfter(hm(repo.settings.dayCutoff))) g.finalize().first else return null
         }
-        val src = if (g.checkout != null) Source.AUTO else Source.NEEDS_CHECK
+        val src = if (g.checkout != null && !g.uncertain) Source.AUTO else Source.NEEDS_CHECK
         val rec = toRecord(c, d, g, co, src)
         if (existing != rec) repo.saveDay(rec)
         return rec
@@ -78,6 +78,28 @@ object Engine {
             Notif.post(ctx, 30 + c.id.toInt(), "오늘은 ${c.name} 급여일이에요",
                 "${np.label.monthValue}월분(${np.rangeText()}) 예상 실수령 ${"%,d".format(p.net)}원")
         }
+    }
+
+    /**
+     * 판정 방식이 바뀐 새 버전을 처음 실행하면, 최근 60일 자동 기록을 위치 기록으로 다시 계산 (직접 입력한 기록은 그대로)
+     * → 이전 버전이 잘못 기록한 날(예: 16:50 퇴근 → 10:50)이 자동으로 바로잡힘
+     */
+    fun reevaluateOnUpgrade(ctx: Context, appVersion: Long) {
+        val p = ctx.getSharedPreferences("worklife", Context.MODE_PRIVATE)
+        if (p.getLong("reevalVersion", 0) >= appVersion) return
+        val repo = Repo.get(ctx)
+        val today = LocalDate.now()
+        for (back in 0L..60L) {
+            val d = today.minusDays(back)
+            val c = repo.companyOn(d) ?: continue
+            val r = repo.day(d, c.id) ?: continue
+            if (r.source == Source.MANUAL || r.status != Status.WORK) continue
+            if (!repo.hasLocs(d)) continue
+            repo.deleteDay(d, c.id)
+        }
+        settlePast(ctx, today)
+        checkToday(ctx)
+        p.edit().putLong("reevalVersion", appVersion).apply()
     }
 
     /** 지난 날 중 확정 기록 없이 위치만 있는 날 자동 마감 */

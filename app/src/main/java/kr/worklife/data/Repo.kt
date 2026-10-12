@@ -16,17 +16,20 @@ import java.time.YearMonth
 data class PayHistory(val ym: YearMonth, val companyId: Long, val companyName: String,
                       val gross: Int, val deduct: Int, val net: Int, val kind: String, val lines: List<PayLine>)
 
-class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.db", null, 1) {
+class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.db", null, 2) {
     private val prefs = ctx.getSharedPreferences("worklife", Context.MODE_PRIVATE)
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE days(day TEXT, company INTEGER, status TEXT, ci TEXT, co TEXT, src TEXT, note TEXT, PRIMARY KEY(day, company))")
-        db.execSQL("CREATE TABLE locs(ts TEXT, lat REAL, lon REAL, acc REAL)")
+        db.execSQL("CREATE TABLE locs(ts TEXT, lat REAL, lon REAL, acc REAL, kind TEXT)")
         db.execSQL("CREATE INDEX idx_locs ON locs(ts)")
         db.execSQL("CREATE TABLE payslips(ym TEXT, company INTEGER, json TEXT, kind TEXT, saved_at TEXT, PRIMARY KEY(ym, company))")
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {}
+    override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {
+        // v2: 위치 기록에 종류(fix/enter/exit) 추가 — 기존 기록은 그대로 유지
+        if (o < 2) runCatching { db.execSQL("ALTER TABLE locs ADD COLUMN kind TEXT") }
+    }
 
     // ───────── 설정 ─────────
     var settings: AppSettings
@@ -132,13 +135,14 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
     // ───────── 위치 ─────────
     fun addLoc(s: LocSample) {
         writableDatabase.insert("locs", null, ContentValues().apply {
-            put("ts", s.ts.withNano(0).toString()); put("lat", s.lat); put("lon", s.lon); put("acc", s.accuracy)
+            put("ts", s.ts.withNano(0).toString()); put("lat", s.lat); put("lon", s.lon); put("acc", s.accuracy); put("kind", s.kind)
         })
     }
 
     fun locsOf(d: LocalDate): List<LocSample> =
         readableDatabase.query("locs", null, "ts LIKE ?", arrayOf("$d%"), null, null, "ts").use { c ->
-            buildList { while (c.moveToNext()) add(LocSample(LocalDateTime.parse(c.getString(0)), c.getDouble(1), c.getDouble(2), c.getDouble(3))) }
+            buildList { while (c.moveToNext()) add(LocSample(LocalDateTime.parse(c.getString(0)), c.getDouble(1), c.getDouble(2), c.getDouble(3),
+                if (c.columnCount > 4 && !c.isNull(4)) c.getString(4) else "fix")) }
         }
 
     /** 위치 기록은 60일만 보관 (근태 기록은 영구) */

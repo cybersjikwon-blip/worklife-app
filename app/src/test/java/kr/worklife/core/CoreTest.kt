@@ -267,4 +267,40 @@ class CoreTest {
         val early = learnCheckoutWindow(c, List(6) { hm("14:30") })!!
         assertEquals(hm("14:15"), trackingStart(c, early)); assertEquals(hm("15:00"), early.to)
     }
+
+    // ── 10/12 실제 버그: 16:50 퇴근인데 10:50으로 기록 (위치 기록 공백)
+    private fun mon(t: String, dist: Double, kind: String = "fix"): LocSample {
+        val (la, lo) = offsetPoint(WL.first, WL.second, dist); return LocSample(LocalDate.of(2026, 10, 12).atTime(hm(t)), la, lo, 10.0, kind)
+    }
+    private fun monAt(t: String) = LocalDate.of(2026, 10, 12).atTime(hm(t))
+    @Test fun sparseGeofenceExit() {   // 출입 알림(exit) 16:51 + 2분 뒤 재확인
+        val g = GeofenceTracker(c, s, LocalDate.of(2026, 10, 12))
+        g.feedAll(listOf(mon("05:58", 30.0, "enter"), mon("10:50", 20.0), mon("16:51", 180.0, "exit"), mon("16:53", 1500.0)))
+        assertEquals(monAt("16:50"), g.checkout); assertTrue(g.estimated); assertTrue(!g.uncertain)
+    }
+    @Test fun sparseOldDataNoKind() {  // 이미 저장된 기록(종류 표시 없음)도 16시대로, 단 확인필요
+        val g = GeofenceTracker(c, s, LocalDate.of(2026, 10, 12))
+        g.feedAll(listOf(mon("05:58", 30.0), mon("10:50", 20.0), mon("16:51", 180.0), mon("16:53", 1500.0)))
+        assertEquals(monAt("16:50"), g.checkout); assertTrue(g.uncertain)
+    }
+    @Test fun sparsePollFarAway() {    // 10분 확인에서 3km 떨어진 곳에서 처음 잡힘 → 이동시간 6분 빼서 추정
+        val g = GeofenceTracker(c, s, LocalDate.of(2026, 10, 12))
+        g.feedAll(listOf(mon("06:00", 20.0), mon("14:55", 20.0), mon("16:56", 3000.0), mon("17:06", 6000.0)))
+        assertEquals(monAt("16:50"), g.checkout)
+    }
+    @Test fun densePollingUsesLastInside() {  // 10분 간격으로 잘 들어오면 기존처럼 마지막 회사 확인 시각
+        val g = GeofenceTracker(c, s, LocalDate.of(2026, 10, 12))
+        g.feedAll(listOf(mon("06:00", 20.0), mon("16:35", 20.0), mon("16:45", 20.0), mon("16:55", 900.0), mon("17:05", 3000.0)))
+        assertEquals(monAt("16:45"), g.checkout); assertTrue(!g.estimated)
+    }
+    @Test fun sparseFinalizeAfterPhoneOff() {   // 이탈 1건 후 폰 꺼짐 → 마감 때도 추정 시각
+        val g = GeofenceTracker(c, s, LocalDate.of(2026, 10, 12))
+        g.feedAll(listOf(mon("06:00", 20.0), mon("10:50", 20.0), mon("16:51", 180.0, "exit")))
+        assertEquals(monAt("16:50") to Source.AUTO, g.finalize())
+    }
+    @Test fun earlyLeaveStillFlagged() {  // 정말 일찍 나간 경우는 여전히 조퇴 의심
+        val g = GeofenceTracker(c, s, LocalDate.of(2026, 10, 12))
+        g.feedAll(listOf(mon("06:00", 20.0), mon("11:00", 20.0), mon("11:05", 300.0, "exit"), mon("15:10", 3000.0), mon("15:20", 3000.0)))
+        assertEquals(monAt("11:00"), g.checkout); assertTrue(g.notes.any { "정시 전" in it })
+    }
 }

@@ -1,6 +1,7 @@
 package kr.worklife.ui
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
@@ -136,6 +137,7 @@ fun EditDayDialog(c: Company, r: DayRecord, onDismiss: () -> Unit, onSave: (DayR
                     if (co.isBefore(ci)) Text("퇴근이 출근보다 빨라요", color = MaterialTheme.colorScheme.error)
                 }
                 Field("메모", note, { note = it })
+                LocLog(c, r.day)
             }
         },
         confirmButton = {
@@ -154,3 +156,27 @@ fun EditDayDialog(c: Company, r: DayRecord, onDismiss: () -> Unit, onSave: (DayR
     )
 }
 
+
+/** 진단용: 그날 받은 위치 기록 (시각·회사와의 거리·종류) */
+@Composable
+private fun LocLog(c: Company, d: LocalDate) {
+    val ctx = LocalContext.current
+    var open by remember { mutableStateOf(false) }
+    val locs = remember(d) { runCatching { Repo.get(ctx).locsOf(d) }.getOrDefault(emptyList()) }
+    if (locs.isEmpty()) {
+        Text("이 날 위치 기록 없음", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f), modifier = Modifier.padding(top = 6.dp))
+        return
+    }
+    TextButton(onClick = { open = !open }, contentPadding = PaddingValues(0.dp)) {
+        Text(if (open) "위치 기록 접기" else "위치 기록 보기 (${locs.size}건)", fontSize = 13.sp)
+    }
+    if (open) Column(Modifier.heightIn(max = 220.dp).verticalScroll(androidx.compose.foundation.rememberScrollState())) {
+        locs.forEach { l ->
+            val dist = haversineM(c.lat, c.lon, l.lat, l.lon).toInt()
+            val inside = dist <= c.radiusM
+            val kind = when (l.kind) { "exit" -> " · 나감 알림"; "enter" -> " · 들어옴 알림"; else -> "" }
+            Text("${l.ts.toLocalTime().hhmm()}  ${if (inside) "회사" else "밖"} ${dist}m  ±${l.accuracy.toInt()}m$kind",
+                fontSize = 12.sp, color = if (inside) MaterialTheme.colorScheme.onSurface else OtOrange)
+        }
+    }
+}

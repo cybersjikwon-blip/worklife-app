@@ -64,6 +64,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun prepare() {
+        runCatching { Engine.reevaluateOnUpgrade(this, Updater.currentCode(this)) }
         Engine.settlePast(this)
         Engine.checkToday(this)
         Scheduler.scheduleAll(this)

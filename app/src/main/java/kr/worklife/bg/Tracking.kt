@@ -37,9 +37,9 @@ fun Context.hasPerm(p: String) = ContextCompat.checkSelfPermission(this, p) == P
 fun Context.hasFineLoc() = hasPerm(Manifest.permission.ACCESS_FINE_LOCATION) || hasPerm(Manifest.permission.ACCESS_COARSE_LOCATION)
 fun Context.hasBgLoc() = hasPerm(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
 
-fun Location.toSample() = LocSample(
+fun Location.toSample(kind: String = "fix") = LocSample(
     LocalDateTime.ofInstant(Instant.ofEpochMilli(time), ZoneId.systemDefault()).withNano(0),
-    latitude, longitude, if (hasAccuracy()) accuracy.toDouble() else 30.0)
+    latitude, longitude, if (hasAccuracy()) accuracy.toDouble() else 30.0, kind)
 
 // ───────────────────────── 알림 ─────────────────────────
 object Notif {
@@ -191,9 +191,9 @@ object Scheduler {
 
 /** 위치 1건 처리 공통 경로 (서비스·알람·지오펜스·앱 실행 모두 이걸 사용). 퇴근 확정되면 true */
 object Tracker {
-    fun onSample(ctx: Context, l: Location): Boolean {
+    fun onSample(ctx: Context, l: Location, kind: String = "fix"): Boolean {
         val repo = Repo.get(ctx)
-        val smp = l.toSample()
+        val smp = l.toSample(kind)
         repo.addLoc(smp)
         val d = smp.ts.toLocalDate()
         val rec = Engine.checkToday(ctx)
@@ -271,7 +271,12 @@ class GeofenceReceiver : BroadcastReceiver() {
         if (ev.hasError()) return
         val loc = ev.triggeringLocation ?: return
         Notif.init(ctx)
-        val done = runCatching { Tracker.onSample(ctx, loc) }.getOrDefault(false)
+        val kind = when (ev.geofenceTransition) {
+            Geofence.GEOFENCE_TRANSITION_EXIT -> "exit"
+            Geofence.GEOFENCE_TRANSITION_ENTER -> "enter"
+            else -> "fix"
+        }
+        val done = runCatching { Tracker.onSample(ctx, loc, kind) }.getOrDefault(false)
         if (done) { Scheduler.cancelPoll(ctx); return }
         Scheduler.ensure(ctx)
         // 회사를 벗어나면 2분 뒤 딱 1번 재확인 → 퇴근 시각을 빨리 확정 (계속 2분마다가 아님)
@@ -364,6 +369,7 @@ class TrackingService : Service() {
         if (interval < 0) {
             lastFix = System.currentTimeMillis()
             startUpdates(Scheduler.intervalNow(this))
+            Geo.current(this) { l -> if (l != null) onLoc(l) } // 감시 시작 시점 위치를 바로 기록
         }
         Scheduler.schedulePoll(this, Scheduler.intervalNow(this).coerceAtLeast(1)) // 서비스가 죽어도 알람이 이어받음
         handler.removeCallbacks(watchdog)

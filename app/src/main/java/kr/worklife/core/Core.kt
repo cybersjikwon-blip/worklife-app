@@ -149,7 +149,11 @@ class HolidayCalendar(private val company: Company, private val table: Map<Strin
 fun monthDays(ym: YearMonth): List<LocalDate> = (1..ym.lengthOfMonth()).map { ym.atDay(it) }
 
 // ─────────────────────────── 지오펜스 ───────────────────────────
-data class LocSample(val ts: LocalDateTime, val lat: Double, val lon: Double, val accuracy: Double = 10.0)
+/** kind: fix(일반 위치) / enter·exit(지오펜스 출입 알림 — 반경을 넘는 순간 OS가 알려줌) */
+data class LocSample(val ts: LocalDateTime, val lat: Double, val lon: Double, val accuracy: Double = 10.0, val kind: String = "fix")
+
+/** 마지막 회사 확인과 첫 이탈 확인 사이가 이보다 벌어지면 '그 사이 언제 나갔는지' 추정 */
+const val GAP_OK_MIN = 15L
 
 fun haversineM(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
     val r = 6_371_000.0
@@ -183,7 +187,31 @@ class GeofenceTracker(private val c: Company, private val s: AppSettings, val da
     var ignored = 0; private set
     val notes = mutableListOf<String>()
     private var outSince: LocalDateTime? = null
+    private var outFirst: LocSample? = null
     private var outCount = 0
+    /** 위치 기록 공백 때문에 퇴근 시각을 추정했는지 / 추정이 불확실해서 확인이 필요한지 */
+    var estimated = false; private set
+    var uncertain = false; private set
+
+    /**
+     * 퇴근(이탈) 시각 결정.
+     *  위치를 촘촘히 받았으면 = 마지막 회사 확인 시각.
+     *  기록 공백이 크면(예: 10:50 회사 확인 → 16:51 첫 이탈 확인) 마지막 확인 시각을 쓰면 안 됨.
+     *  지오펜스는 반경을 넘는 순간 알려주므로, 그 사이 이탈 알림이 없었다면 계속 회사에 있었던 것 →
+     *  첫 이탈 확인 시각에서 이동시간(출입 알림 1분, 일반 위치는 거리÷시속30km)을 뺀 시각으로 추정
+     */
+    private fun departure(li: LocalDateTime): LocalDateTime {
+        val of = outFirst ?: return li
+        val gap = ChronoUnit.MINUTES.between(li, of.ts)
+        if (gap <= GAP_OK_MIN) return li
+        val travel = if (of.kind == "exit") 1L else kotlin.math.ceil(distance(of) / 500.0).toLong().coerceAtLeast(1)
+        var est = of.ts.minusMinutes(travel)
+        if (est.isBefore(li)) est = li
+        estimated = true
+        notes += "위치 기록 공백 ${li.toLocalTime().hhmm()}~${of.ts.toLocalTime().hhmm()} → 이탈 확인 기준 ${est.toLocalTime().hhmm()} 퇴근으로 추정"
+        if (of.kind != "exit" && gap > 60) uncertain = true
+        return est.withSecond(0).withNano(0)
+    }
 
     fun distance(smp: LocSample) = haversineM(c.lat, c.lon, smp.lat, smp.lon)
 
@@ -206,16 +234,16 @@ class GeofenceTracker(private val c: Company, private val s: AppSettings, val da
                 val mins = ChronoUnit.MINUTES.between(os, smp.ts)
                 if (mins >= s.exitConfirmMin) notes += "근무중 이탈 ${os.toLocalTime().hhmm()}~${smp.ts.toLocalTime().hhmm()} (${mins}분)"
             }
-            outSince = null; outCount = 0
+            outSince = null; outFirst = null; outCount = 0
             return null
         }
         val li = lastInside ?: return null // 출근 전 이동중
-        if (outSince == null) outSince = smp.ts
+        if (outSince == null) { outSince = smp.ts; outFirst = smp }
         outCount++
         val away = ChronoUnit.SECONDS.between(outSince, smp.ts) / 60.0
         val far = distance(smp) >= s.fastExitM
         if ((holiday || !smp.ts.isBefore(endDt)) && outCount >= s.exitConfirmSamples && (away >= s.exitConfirmMin || far)) {
-            var co = li
+            var co = departure(li)
             if (holiday) { checkout = co; return checkout }
             if (co.isBefore(endDt)) {
                 if (ChronoUnit.MINUTES.between(co, endDt) > s.exitConfirmMin) notes += "정시 전 이탈 의심 (마지막 사업장 확인 ${co.toLocalTime().hhmm()})"
@@ -235,9 +263,10 @@ class GeofenceTracker(private val c: Company, private val s: AppSettings, val da
     fun finalize(): Pair<LocalDateTime, Source> {
         checkout?.let { return it to Source.AUTO }
         val li = lastInside ?: run { notes += "위치 기록 없음 → 정시 퇴근 처리"; return endDt to Source.DEFAULT }
-        if (holiday) return li to (if (outSince != null) Source.AUTO else Source.NEEDS_CHECK)
+        if (holiday) return (if (outSince != null) departure(li) else li) to (if (outSince != null && !uncertain) Source.AUTO else Source.NEEDS_CHECK)
         if (outSince != null) {
-            if (!li.isBefore(endDt)) return li to Source.AUTO
+            val dep = departure(li)
+            if (!dep.isBefore(endDt)) return dep to (if (uncertain) Source.NEEDS_CHECK else Source.AUTO)
             if (ChronoUnit.MINUTES.between(li, endDt) <= s.exitConfirmMin) return endDt to Source.AUTO
             notes += "정시 전 이탈 후 기록 끊김 (마지막 사업장 ${li.toLocalTime().hhmm()}) → 조퇴 여부 확인 필요"
             return li to Source.NEEDS_CHECK
