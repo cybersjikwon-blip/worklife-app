@@ -153,15 +153,7 @@ fun AppRoot(version: Int, tab: Int, setTab: (Int) -> Unit, bump: () -> Unit) {
     }
     UpdateDialogHost(bump)
 
-    // 뒤로가기: 다른 탭이면 홈으로, 홈이면 종료 확인
-    var askExit by remember { mutableStateOf(false) }
+    // 뒤로가기: 다른 탭이면 홈으로, 홈에서 한 번 더 누르면 바로 종료 (확인 메시지 없음)
     val act = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
-    BackHandler(enabled = true) { if (tab != 0) setTab(0) else askExit = true }
-    if (askExit) AlertDialog(
-        onDismissRequest = { askExit = false },
-        title = { Text("앱을 종료할까요?") },
-        text = { Text("앱을 닫아도 퇴근 감지와 알림은 계속 동작해요.") },
-        confirmButton = { TextButton(onClick = { askExit = false; act?.finish() }) { Text("종료") } },
-        dismissButton = { TextButton(onClick = { askExit = false }) { Text("취소") } },
-    )
+    BackHandler(enabled = true) { if (tab != 0) setTab(0) else act?.finish() }
 }

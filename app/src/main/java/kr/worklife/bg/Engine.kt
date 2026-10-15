@@ -27,7 +27,7 @@ object Engine {
         val ci = if (!workday) g.firstInside?.toLocalTime()?.withSecond(0)?.withNano(0) ?: hm(c.workStart) else hm(c.workStart)
         g.firstInside?.let { if (workday && it.toLocalTime().isAfter(hm(c.workStart).plusMinutes(10))) notes.add(0, "첫 사업장 확인 ${it.toLocalTime().hhmm()}") }
         return DayRecord(d, c.id, if (workday) Status.WORK else Status.HOLIDAY_WORK, ci,
-            co.toLocalTime().withSecond(0).withNano(0), src, notes.joinToString(" / "))
+            co.toLocalTime().withSecond(0).withNano(0), src, notes.joinToString(" / "), g.lunchOverMin)
     }
 
     /** 오늘: 퇴근이 확정됐으면 저장하고 기록 반환 (수동 기록은 절대 덮어쓰지 않음) */
@@ -66,6 +66,37 @@ object Engine {
                 "${fi.toLocalTime().hhmm()} ~ ${co.toLocalTime().hhmm()} · 근무하셨다면 앱에서 [휴일근무로 기록]을 눌러주세요.")
         }
         return g
+    }
+
+    const val FIELD_NOTE = "외근"
+
+    /** 오늘 외근: 위치로 판정하지 않고 정시 퇴근으로 기록 (늦게 끝나면 퇴근시각 입력으로 수정) */
+    fun setFieldWork(ctx: Context, on: Boolean, d: LocalDate = LocalDate.now()) {
+        val repo = Repo.get(ctx)
+        val c = repo.companyOn(d) ?: return
+        if (on) repo.saveDay(DayRecord(d, c.id, Status.WORK, hm(c.workStart), hm(c.workEnd), Source.MANUAL, FIELD_NOTE))
+        else { repo.deleteDay(d, c.id); checkToday(ctx) }
+    }
+
+    fun isFieldWork(r: DayRecord?) = r != null && r.source == Source.MANUAL && r.note == FIELD_NOTE
+
+    /**
+     * 점심 끝나고 30분 뒤 1회: 점심시간에 나가서 아직 회사 밖이면 [조퇴로 기록]/[외근·업무 중] 확인 알림
+     * (추가 위치 확인 없이 회사 출입 알림 기록만으로 판단)
+     */
+    fun lunchReturnCheck(ctx: Context, now: LocalDateTime = LocalDateTime.now()) {
+        val d = now.toLocalDate()
+        val repo = Repo.get(ctx)
+        val (_, g, c) = evaluate(ctx, d)
+        if (g == null || c == null || !HolidayCalendar(c).isWorkday(d)) return
+        if (repo.day(d, c.id) != null) return
+        val os = g.outsideSince ?: return
+        if (!c.inLunch(os.toLocalTime())) return
+        val p = ctx.getSharedPreferences("worklife", Context.MODE_PRIVATE)
+        val key = "lunchAsked-$d"
+        if (p.getBoolean(key, false)) return
+        p.edit().putBoolean(key, true).apply()
+        Notif.lunchNotBack(ctx, os.toLocalTime())
     }
 
     /** 오늘이 급여일이면 아침 알림 (자정 마감 알람에서 호출) */

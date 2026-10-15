@@ -71,7 +71,12 @@ data class Company(
     val annualLeaveDays: Int = -1,      // -1 = 근로기준법 자동 계산
     val leaveBasis: String = "hire",    // hire 입사일 기준 / calendar 1월 1일 기준
     val leaveCarryover: Double = 0.0,   // 이월 연차
+    // ── 점심 외출
+    val lunchStart: String = "11:30",   // 이 시간대에 나갔다 오면 '점심 외출'로만 표시
+    val lunchEnd: String = "13:00",
+    val lunchOverDeduct: Boolean = false, // 점심시간 넘겨 돌아온 시간 공제 (기본 꺼짐)
 ) {
+    fun inLunch(t: LocalTime) = !t.isBefore(hm(lunchStart)) && t.isBefore(hm(lunchEnd))
     val hasLocation get() = lat != 0.0 || lon != 0.0
     fun activeOn(d: LocalDate) = !d.isBefore(startDate) && (endDate == null || !d.isAfter(endDate))
     fun scheduledMin() = hm(workEnd).minOfDay() - hm(workStart).minOfDay() - lunchMin
@@ -88,7 +93,7 @@ data class AppSettings(
     val deductEarlyLeave: Boolean = false,
     val exitConfirmMin: Int = 10,
     val exitConfirmSamples: Int = 2,
-    val fastExitM: Double = 1000.0,
+    val fastExitM: Double = 0.0,          // 0 = 자동 (회사 반경 × 10, 최소 1km)
     val maxAccuracyM: Double = 50.0,
     val dayCutoff: String = "23:59",
     val dependents: Int = 1,
@@ -107,6 +112,8 @@ data class AppSettings(
     val fastIntervalMin: Int = 3,
     val holidayPollMin: Int = 30,         // 휴일 회사에 있을 때 백업 확인 (0 = 끔, 지오펜스만)
 ) {
+    fun fastExitFor(c: Company): Double = if (fastExitM > 0) fastExitM else max(1000.0, c.radiusM * 10)
+
     fun minWage(year: Int): Int {
         if (minWageOverride > 0) return minWageOverride
         val t = minWageTable.ifEmpty { DEFAULT_MIN_WAGE }
@@ -193,6 +200,13 @@ class GeofenceTracker(private val c: Company, private val s: AppSettings, val da
     var estimated = false; private set
     var uncertain = false; private set
 
+    /** 근무 중 외출 기록 (점심 외출 포함) */
+    data class Outing(val from: LocalDateTime, val to: LocalDateTime, val lunch: Boolean, val overMin: Int)
+    val outings = mutableListOf<Outing>()
+    val lunchOverMin get() = outings.sumOf { it.overMin }
+    /** 지금(마지막 기록 기준) 회사 밖에 있는지, 언제부터인지 */
+    val outsideSince: LocalDateTime? get() = if (checkout == null) outSince else null
+
     /**
      * 퇴근(이탈) 시각 결정.
      *  위치를 촘촘히 받았으면 = 마지막 회사 확인 시각.
@@ -232,7 +246,16 @@ class GeofenceTracker(private val c: Company, private val s: AppSettings, val da
             val os = outSince
             if (os != null && os.isBefore(endDt)) {
                 val mins = ChronoUnit.MINUTES.between(os, smp.ts)
-                if (mins >= s.exitConfirmMin) notes += "근무중 이탈 ${os.toLocalTime().hhmm()}~${smp.ts.toLocalTime().hhmm()} (${mins}분)"
+                val lunch = !holiday && c.inLunch(os.toLocalTime())
+                if (lunch) {
+                    // 점심시간에 나갔다 온 것 → '점심 외출'. 점심 끝난 뒤 돌아온 만큼만 초과
+                    val over = ChronoUnit.MINUTES.between(day.atTime(hm(c.lunchEnd)), smp.ts).toInt().coerceAtLeast(0)
+                    outings += Outing(os, smp.ts, true, over)
+                    if (over > 0) notes += "점심 외출 ${os.toLocalTime().hhmm()}~${smp.ts.toLocalTime().hhmm()} (${over}분 초과)"
+                } else if (mins >= s.exitConfirmMin) {
+                    outings += Outing(os, smp.ts, false, 0)
+                    notes += "근무중 이탈 ${os.toLocalTime().hhmm()}~${smp.ts.toLocalTime().hhmm()} (${mins}분)"
+                }
             }
             outSince = null; outFirst = null; outCount = 0
             return null
@@ -241,7 +264,7 @@ class GeofenceTracker(private val c: Company, private val s: AppSettings, val da
         if (outSince == null) { outSince = smp.ts; outFirst = smp }
         outCount++
         val away = ChronoUnit.SECONDS.between(outSince, smp.ts) / 60.0
-        val far = distance(smp) >= s.fastExitM
+        val far = distance(smp) >= s.fastExitFor(c)
         if ((holiday || !smp.ts.isBefore(endDt)) && outCount >= s.exitConfirmSamples && (away >= s.exitConfirmMin || far)) {
             var co = departure(li)
             if (holiday) { checkout = co; return checkout }
@@ -297,6 +320,7 @@ data class DayRecord(
     val checkOut: LocalTime? = null,
     val source: Source = Source.DEFAULT,
     val note: String = "",
+    val lunchOverMin: Int = 0,          // 점심시간을 넘겨 돌아온 시간(분)
 )
 
 fun overtimeMin(c: Company, r: DayRecord): Int {
@@ -442,6 +466,7 @@ data class Payslip(
     val earlyMin: Int, val earlyDeduct: Int, val gross: Int, val nontaxable: Int, val taxable: Int,
     val pension: Int, val health: Int, val ltc: Int, val employment: Int, val incomeTax: Int, val localTax: Int,
     val totalDeduct: Int, val net: Int, val warnings: List<String>,
+    val lunchOverMin: Int = 0, val lunchOverDeduct: Int = 0,
 ) {
     fun lines(): List<PayLine> = buildList {
         add(PayLine("기본급", base))
@@ -450,6 +475,7 @@ data class Payslip(
         add(PayLine("만근수당 [$bonusStatus]", bonus))
         if (absenceDeduct > 0) add(PayLine("결근 공제 (${absenceDays}일)", -absenceDeduct))
         if (earlyDeduct > 0) add(PayLine("조퇴 공제 (${earlyMin}분)", -earlyDeduct))
+        if (lunchOverDeduct > 0) add(PayLine("점심 초과 공제 (${lunchOverMin}분)", -lunchOverDeduct))
         add(PayLine("지급 합계", gross, true))
         add(PayLine("국민연금", -pension)); add(PayLine("건강보험", -health)); add(PayLine("장기요양보험", -ltc))
         add(PayLine("고용보험", -employment)); add(PayLine("소득세", -incomeTax)); add(PayLine("지방소득세", -localTax))
@@ -507,7 +533,9 @@ fun calcPayroll(c: Company, s: AppSettings, p: PayPeriod, records: List<DayRecor
         else -> c.fullAttendanceBonus to "만근"
     }
 
-    val gross = base + otPay + hwPay + bonus - absDeduct - earlyDeduct
+    val lunchOver = recs.filter { it.status == Status.WORK }.sumOf { it.lunchOverMin }
+    val lunchDeduct = if (c.lunchOverDeduct) (lunchOver / 60.0 * hourly).toInt() else 0
+    val gross = base + otPay + hwPay + bonus - absDeduct - earlyDeduct - lunchDeduct
     val nontax = min(s.nontaxableMonthly, max(0, gross))
     val taxable = gross - nontax
 
@@ -535,7 +563,8 @@ fun calcPayroll(c: Company, s: AppSettings, p: PayPeriod, records: List<DayRecor
     if (need.isNotEmpty()) warn += "퇴근 확인 필요: " + need.joinToString(", ") { "${it.day.monthValue}/${it.day.dayOfMonth}" }
 
     return Payslip(ym, c.id, c.name, mw, hourly, base, ot, otPay, hw, hwPay, bonus, bstat, absentDays, absDeduct,
-        early, earlyDeduct, gross, nontax, taxable, pension, health, ltc, employment, itax, ltax, total, gross - total, warn)
+        early, earlyDeduct, gross, nontax, taxable, pension, health, ltc, employment, itax, ltax, total, gross - total, warn,
+        lunchOverMin = lunchOver, lunchOverDeduct = lunchDeduct)
 }
 
 // ─────────────────────────── 홈 화면 요약 ───────────────────────────

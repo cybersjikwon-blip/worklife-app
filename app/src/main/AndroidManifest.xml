@@ -50,6 +50,7 @@
 
         <receiver android:name=".bg.AlarmReceiver" android:exported="false" />
         <receiver android:name=".bg.GeofenceReceiver" android:exported="false" />
+        <receiver android:name=".bg.ActionReceiver" android:exported="false" />
         <receiver android:name=".bg.BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

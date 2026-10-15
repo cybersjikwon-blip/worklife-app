@@ -94,12 +94,25 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
             Text(data.needCheck.joinToString(", ") { "${it.day.dayOfMonth}일" } + " — 눌러서 확인", fontSize = 14.sp)
         }
 
-        // ── 오늘
-        SCard {
-            CardTitle("오늘")
-            val (title, sub) = todayStatus(c, data, hol, now)
+        // ── 오늘 (근무 중이면 옅은 녹색)
+        val (title, sub) = todayStatus(c, data, hol, now)
+        val field = Engine.isFieldWork(data.rec)
+        val working = hol == null && (title == "근무 중" || title.startsWith("연장 근무 중") || title == "퇴근 감지 중" ||
+            (field && now.toLocalTime().isBefore(hm(c.workEnd)) && now.toLocalTime().isAfter(hm(c.workStart))))
+        SCard(color = if (working) WorkingGreen else null) {
+            CardTitle("오늘", trailing = { if (working) Tag(if (field) "외근" else "근무 중", OkGreen) })
             Text(title, fontSize = 24.sp, fontWeight = FontWeight.Bold)
             Text(sub, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f), modifier = Modifier.padding(top = 4.dp))
+            // 점심 외출 표시
+            data.tracker?.outings?.filter { it.lunch }?.forEach { o ->
+                Text("점심 외출 ${o.from.toLocalTime().hhmm()}~${o.to.toLocalTime().hhmm()}" + (if (o.overMin > 0) " (${o.overMin}분 초과)" else ""),
+                    fontSize = 13.sp, color = if (o.overMin > 0) OtOrange else MaterialTheme.colorScheme.onSurface.copy(alpha = .6f),
+                    modifier = Modifier.padding(top = 4.dp))
+            }
+            data.tracker?.outsideSince?.let { os ->
+                if (hol == null && data.rec == null && c.inLunch(os.toLocalTime()))
+                    Text("점심 외출 중 (${os.toLocalTime().hhmm()}~)", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 4.dp))
+            }
             if (hol == null && data.rec?.status != Status.ABSENT && data.rec?.status != Status.LEAVE && data.rec?.status != Status.HALF_LEAVE) {
                 Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilledTonalButton(onClick = {
@@ -111,6 +124,12 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
                             repo.saveDay(DayRecord(today, c.id, Status.WORK, hm(c.workStart), t, Source.MANUAL, "수동 입력")); bump()
                         }
                     }) { Text("퇴근시각 입력") }
+                }
+                // 외근: 그날은 위치로 판정하지 않음
+                if (field) TextButton(onClick = { Engine.setFieldWork(ctx, false); bump() }, contentPadding = PaddingValues(0.dp)) {
+                    Text("외근 취소 (위치로 다시 판정)", fontSize = 13.sp)
+                } else if (data.rec == null) TextButton(onClick = { Engine.setFieldWork(ctx, true); bump() }, contentPadding = PaddingValues(0.dp)) {
+                    Text("오늘 외근 (위치 판정 안 함)", fontSize = 13.sp)
                 }
             }
         }
@@ -225,6 +244,7 @@ private fun todayStatus(c: Company, d: HomeData, hol: String?, now: LocalDateTim
         r?.status == Status.ABSENT -> "결근" to "만근수당이 지급되지 않아요"
         r?.status == Status.LEAVE -> "연차" to "오늘은 쉬어요"
         r?.status == Status.HALF_LEAVE -> "반차" to "${r?.checkIn?.hhmm() ?: "-"} ~ ${r?.checkOut?.hhmm() ?: "-"}"
+        Engine.isFieldWork(r) -> "외근" to "위치로 판정하지 않아요 · 정시 ${c.workEnd} 퇴근으로 기록 (늦게 끝나면 [퇴근시각 입력])"
         r?.checkOut != null -> {
             val rr = r!!
             val ot = overtimeMin(c, rr)

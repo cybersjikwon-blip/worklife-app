@@ -16,11 +16,11 @@ import java.time.YearMonth
 data class PayHistory(val ym: YearMonth, val companyId: Long, val companyName: String,
                       val gross: Int, val deduct: Int, val net: Int, val kind: String, val lines: List<PayLine>)
 
-class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.db", null, 2) {
+class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.db", null, 3) {
     private val prefs = ctx.getSharedPreferences("worklife", Context.MODE_PRIVATE)
 
     override fun onCreate(db: SQLiteDatabase) {
-        db.execSQL("CREATE TABLE days(day TEXT, company INTEGER, status TEXT, ci TEXT, co TEXT, src TEXT, note TEXT, PRIMARY KEY(day, company))")
+        db.execSQL("CREATE TABLE days(day TEXT, company INTEGER, status TEXT, ci TEXT, co TEXT, src TEXT, note TEXT, lov INTEGER DEFAULT 0, PRIMARY KEY(day, company))")
         db.execSQL("CREATE TABLE locs(ts TEXT, lat REAL, lon REAL, acc REAL, kind TEXT)")
         db.execSQL("CREATE INDEX idx_locs ON locs(ts)")
         db.execSQL("CREATE TABLE payslips(ym TEXT, company INTEGER, json TEXT, kind TEXT, saved_at TEXT, PRIMARY KEY(ym, company))")
@@ -29,6 +29,8 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
     override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {
         // v2: 위치 기록에 종류(fix/enter/exit) 추가 — 기존 기록은 그대로 유지
         if (o < 2) runCatching { db.execSQL("ALTER TABLE locs ADD COLUMN kind TEXT") }
+        // v3: 점심 초과 시간(분)
+        if (o < 3) runCatching { db.execSQL("ALTER TABLE days ADD COLUMN lov INTEGER DEFAULT 0") }
     }
 
     // ───────── 설정 ─────────
@@ -69,7 +71,7 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
     fun saveDay(r: DayRecord) {
         writableDatabase.insertWithOnConflict("days", null, ContentValues().apply {
             put("day", r.day.toString()); put("company", r.companyId); put("status", r.status.name)
-            put("ci", r.checkIn?.hhmm()); put("co", r.checkOut?.hhmm()); put("src", r.source.name); put("note", r.note)
+            put("ci", r.checkIn?.hhmm()); put("co", r.checkOut?.hhmm()); put("src", r.source.name); put("note", r.note); put("lov", r.lunchOverMin)
         }, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
@@ -127,7 +129,8 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
                     add(DayRecord(LocalDate.parse(c.getString(0)), c.getLong(1),
                         runCatching { Status.valueOf(c.getString(2)) }.getOrDefault(Status.WORK),
                         c.getString(3)?.let { LocalTime.parse(it) }, c.getString(4)?.let { LocalTime.parse(it) },
-                        runCatching { Source.valueOf(c.getString(5)) }.getOrDefault(Source.MANUAL), c.getString(6) ?: ""))
+                        runCatching { Source.valueOf(c.getString(5)) }.getOrDefault(Source.MANUAL), c.getString(6) ?: "",
+                        if (c.columnCount > 7 && !c.isNull(7)) c.getInt(7) else 0))
                 }
             }
         }
@@ -186,6 +189,7 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
             put("xh", JSONArray(c.extraHolidays.toList())); put("xw", JSONArray(c.extraWorkdays.toList()))
             put("pStart", c.periodStartDay); put("payDay", c.payDay); put("payOff", c.payMonthOffset); put("payAdj", c.payAdjust)
             put("prorate", c.prorateBy); put("bonusPartial", c.bonusOnPartial)
+            put("lunchS", c.lunchStart); put("lunchE", c.lunchEnd); put("lunchDed", c.lunchOverDeduct)
             put("leaveDays", c.annualLeaveDays); put("leaveBasis", c.leaveBasis); put("leaveCarry", c.leaveCarryover)
         }
 
@@ -203,7 +207,8 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
                 strs("xh"), strs("xw"),
                 j.optInt("pStart", d.periodStartDay), j.optInt("payDay", d.payDay), j.optInt("payOff", d.payMonthOffset),
                 j.optString("payAdj", d.payAdjust), j.optString("prorate", d.prorateBy), j.optBoolean("bonusPartial", d.bonusOnPartial),
-                j.optInt("leaveDays", d.annualLeaveDays), j.optString("leaveBasis", d.leaveBasis), j.optDouble("leaveCarry", d.leaveCarryover))
+                j.optInt("leaveDays", d.annualLeaveDays), j.optString("leaveBasis", d.leaveBasis), j.optDouble("leaveCarry", d.leaveCarryover),
+                j.optString("lunchS", d.lunchStart), j.optString("lunchE", d.lunchEnd), j.optBoolean("lunchDed", d.lunchOverDeduct))
         }
 
         fun settingsToJson(s: AppSettings) = JSONObject().apply {

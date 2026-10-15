@@ -67,12 +67,16 @@ fun BigHeader(title: String, sub: String? = null) {
 }
 
 @Composable
-fun SCard(modifier: Modifier = Modifier, onClick: (() -> Unit)? = null, content: @Composable ColumnScope.() -> Unit) {
+fun SCard(modifier: Modifier = Modifier, onClick: (() -> Unit)? = null, color: Color? = null,
+          content: @Composable ColumnScope.() -> Unit) {
     val m = modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp)
+    // 색이 바뀔 때 0.6초 동안 부드럽게 전환
+    val bg by androidx.compose.animation.animateColorAsState(color ?: MaterialTheme.colorScheme.surface,
+        androidx.compose.animation.core.tween(600), label = "card")
     Card(
         modifier = if (onClick != null) m.clickable { onClick() } else m,
         shape = RoundedCornerShape(26.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        colors = CardDefaults.cardColors(containerColor = bg),
         elevation = CardDefaults.cardElevation(0.dp),
     ) { Column(Modifier.padding(20.dp), content = content) }
 }
@@ -149,3 +153,6 @@ fun PeriodLine(p: kr.worklife.core.PayPeriod) {
         fontSize = 13.sp, color = MaterialTheme.colorScheme.onBackground.copy(alpha = .6f),
         modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
 }
+
+/** 근무 중 카드 배경: 옅은 녹색 (다크 모드는 어두운 녹색) */
+val WorkingGreen: Color @Composable get() = if (isSystemInDarkTheme()) Color(0xFF15302A) else Color(0xFFE6F6EC)

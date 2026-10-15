@@ -108,6 +108,9 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
     var leaveAuto by remember { mutableStateOf(c.annualLeaveDays < 0) }
     var leaveDays by remember { mutableStateOf(if (c.annualLeaveDays < 0) "15" else c.annualLeaveDays.toString()) }
     var leaveBasis by remember { mutableStateOf(c.leaveBasis) }
+    var lunchS by remember { mutableStateOf(hm(c.lunchStart)) }
+    var lunchE by remember { mutableStateOf(hm(c.lunchEnd)) }
+    var lunchDed by remember { mutableStateOf(c.lunchOverDeduct) }
     var carry by remember { mutableStateOf(if (c.leaveCarryover == 0.0) "" else days(c.leaveCarryover).removeSuffix("일")) }
 
     SCard {
@@ -138,7 +141,10 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
             Field("위도", lat, { lat = it }, number = true, modifier = Modifier.weight(1f))
             Field("경도", lon, { lon = it }, number = true, modifier = Modifier.weight(1f))
         }
-        Field("퇴근 판정 반경(m)", radius, { radius = it }, number = true, hint = "회사 건물·주차장이 다 들어가게 (기본 100)")
+        Field("회사 범위 반경(m)", radius, { radius = it }, number = true, hint = "회사 건물·주차장이 다 들어가게 (기본 100)")
+        val fastAuto = maxOf(1000.0, (radius.toDoubleOrNull() ?: 100.0) * 10)
+        Text("반경 밖에 10분 머물거나 ${"%.1f".format(fastAuto / 1000)}km 이상 멀어지면 퇴근으로 판정해요 (세부값은 하단 고급 설정)",
+            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f))
         if (lat.toDoubleOrNull() != null && lon.toDoubleOrNull() != null) TextButton(onClick = {
             runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:$lat,$lon?q=$lat,$lon(${Uri.encode(name)})"))) }
         }) { Text("지도에서 확인") }
@@ -158,6 +164,14 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
             OutlinedButton(onClick = { pickTime(ctx, we) { we = it } }, Modifier.weight(1f)) { Text("퇴근 ${we.hhmm()}") }
         }
         Field("휴게(분)", lunch, { lunch = it }, number = true)
+        Text("점심시간 (이 시간에 나갔다 오면 '점심 외출'로만 표시)", fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { pickTime(ctx, lunchS) { lunchS = it } }, Modifier.weight(1f)) { Text("시작 ${lunchS.hhmm()}") }
+            OutlinedButton(onClick = { pickTime(ctx, lunchE) { lunchE = it } }, Modifier.weight(1f)) { Text("끝 ${lunchE.hhmm()}") }
+        }
+        SwitchRow("점심시간 넘겨 돌아온 시간 급여에서 공제", lunchDed) { lunchDed = it }
+        Text("끝나고 30분이 지나도 회사 밖이면 [조퇴로 기록]/[외근·업무 중]을 물어봐요.", fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
         Text("쉬는 요일", fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             (1..7).forEach { d ->
@@ -228,6 +242,7 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
                 .map { ds -> runCatching { LocalDate.parse(ds).toString() }.getOrElse { err += "날짜 '$ds'"; "" } }.filter { it.isNotEmpty() }.toSet()
             val xhs = dates(xh); val xws = dates(xw)
             if (!we.isAfter(ws)) err += "출퇴근 시각"
+            if (!lunchE.isAfter(lunchS)) err += "점심시간"
             if (end != null && end!!.isBefore(start)) err += "퇴사일"
             if (name.isBlank()) err += "회사 이름"
             if (!payLast && (payDay.toIntOrNull() ?: 0) !in 1..31) err += "급여일(1~31)"
@@ -248,7 +263,8 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
                 payDay = if (payLast) 0 else payDay.toIntOrNull()?.coerceIn(1, 31) ?: 10,
                 payMonthOffset = payOff, payAdjust = payAdj, prorateBy = prorate, bonusOnPartial = bonusPartial,
                 annualLeaveDays = if (leaveAuto) -1 else leaveDays.toIntOrNull()?.coerceIn(0, 60) ?: 15,
-                leaveBasis = leaveBasis, leaveCarryover = carry.toDoubleOrNull()?.coerceIn(0.0, 60.0) ?: 0.0)
+                leaveBasis = leaveBasis, leaveCarryover = carry.toDoubleOrNull()?.coerceIn(0.0, 60.0) ?: 0.0,
+                lunchStart = lunchS.hhmm(), lunchEnd = lunchE.hhmm(), lunchOverDeduct = lunchDed)
         }
 
         /** 저장 + 근무시간·휴일이 바뀌었으면 근무기록을 새 기준으로 다시 맞춤 */
@@ -310,7 +326,7 @@ private fun PersonalForm(bump: () -> Unit) {
     var dedAbs by remember { mutableStateOf(s.deductAbsence) }
     var dedEarly by remember { mutableStateOf(s.deductEarlyLeave) }
     var exitMin by remember { mutableStateOf(s.exitConfirmMin.toString()) }
-    var fast by remember { mutableStateOf(s.fastExitM.toInt().toString()) }
+    var fast by remember { mutableStateOf(if (s.fastExitM > 0) s.fastExitM.toInt().toString() else "") }
     var acc by remember { mutableStateOf(s.maxAccuracyM.toInt().toString()) }
     var cutoff by remember { mutableStateOf(hm(s.dayCutoff)) }
     var pollEnd by remember { mutableStateOf(s.pollAfterEndMin) }
@@ -340,10 +356,6 @@ private fun PersonalForm(bump: () -> Unit) {
         Field("보험요율 수정 (근로자 %)", ins, { ins = it }, hint = "연도:연금,건보,장기요양(건보료대비),고용 ; 예) 2027:5.0,3.6,13.2,0.9")
 
         Text("퇴근 자동 감지", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
-        Field("반경 밖 머문 시간(분) 후 확정", exitMin, { exitMin = it }, number = true, hint = "편의점 다녀오기 정도는 무시 (기본 10)")
-        Field("이 거리(m) 이상 멀어지면 즉시 확정", fast, { fast = it }, number = true, hint = "차로 출발하는 경우 (기본 1000)")
-        Field("GPS 오차 허용(m)", acc, { acc = it }, number = true, hint = "이보다 부정확한 위치는 버림 (기본 50)")
-        OutlinedButton(onClick = { pickTime(ctx, cutoff) { cutoff = it } }) { Text("하루 마감 ${cutoff.hhmm()}") }
         Text("정시 이후 위치 확인 간격", fontSize = 14.sp, modifier = Modifier.padding(top = 8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             listOf(5, 10, 15, 30).forEach { m -> FilterChip(pollEnd == m, { pollEnd = m }, label = { Text("${m}분") }) }
@@ -355,6 +367,17 @@ private fun PersonalForm(bump: () -> Unit) {
         }
         Text("정시 전에는 회사 출입 알림(지오펜스)만 써서 배터리를 거의 안 써요. 퇴근이 확정되면 확인을 멈춰요.", fontSize = 12.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+
+        var adv by remember { mutableStateOf(false) }
+        TextButton(onClick = { adv = !adv }, contentPadding = PaddingValues(0.dp), modifier = Modifier.padding(top = 4.dp)) {
+            Text(if (adv) "▲ 고급 설정 접기" else "▼ 고급 설정 (보통은 바꿀 필요 없어요)", fontSize = 14.sp)
+        }
+        if (adv) {
+            Field("반경 밖 머문 시간(분) 후 퇴근 확정", exitMin, { exitMin = it }, number = true, hint = "편의점·주차장 다녀오기는 무시 (기본 10)")
+            Field("즉시 퇴근 확정 거리(m)", fast, { fast = it }, number = true, hint = "반경 밖에서 이만큼 멀어지면 10분 안 기다리고 바로 확정 · 비우면 자동(반경×10, 최소 1km)")
+            Field("GPS 오차 허용(m)", acc, { acc = it }, number = true, hint = "이보다 부정확한 위치는 버림 (기본 50)")
+            OutlinedButton(onClick = { pickTime(ctx, cutoff) { cutoff = it } }) { Text("하루 마감 ${cutoff.hhmm()}") }
+        }
 
         Button(onClick = {
             val table = runCatching {
@@ -376,7 +399,7 @@ private fun PersonalForm(bump: () -> Unit) {
                 withholdingRatio = ratio, nontaxableMonthly = nontax.filter { it.isDigit() }.toIntOrNull() ?: 0,
                 insuranceBaseOverride = insBase.filter { it.isDigit() }.toIntOrNull() ?: 0,
                 incomeTaxOverride = itax.filter { it.isDigit() }.toIntOrNull() ?: -1, insOverride = insMap,
-                exitConfirmMin = exitMin.toIntOrNull()?.coerceIn(0, 60) ?: 10, fastExitM = fast.toDoubleOrNull()?.coerceIn(200.0, 20000.0) ?: 1000.0,
+                exitConfirmMin = exitMin.toIntOrNull()?.coerceIn(0, 60) ?: 10, fastExitM = fast.toDoubleOrNull()?.coerceIn(200.0, 20000.0) ?: 0.0,
                 maxAccuracyM = acc.toDoubleOrNull()?.coerceIn(5.0, 500.0) ?: 50.0, dayCutoff = cutoff.hhmm(),
                 pollAfterEndMin = pollEnd, fastLearnedWindow = fastOn, holidayPollMin = holPoll)
             Toast.makeText(ctx, "저장했어요", Toast.LENGTH_SHORT).show()

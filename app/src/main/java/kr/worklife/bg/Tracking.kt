@@ -71,6 +71,22 @@ object Notif {
         } catch (_: SecurityException) { }
     }
 
+    @SuppressLint("MissingPermission")
+    fun lunchNotBack(ctx: Context, since: java.time.LocalTime) {
+        val nm = NotificationManagerCompat.from(ctx)
+        if (!nm.areNotificationsEnabled()) return
+        fun act(a: String, code: Int) = PendingIntent.getBroadcast(ctx, code,
+            Intent(ctx, ActionReceiver::class.java).setAction(a), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        try {
+            nm.notify(15, NotificationCompat.Builder(ctx, CH_EVENT).setSmallIcon(R.drawable.ic_stat)
+                .setContentTitle("점심 후 아직 회사 밖이에요")
+                .setContentText("${since.hhmm()}에 나가셨어요. 조퇴인가요, 외근인가요?")
+                .setAutoCancel(true).setContentIntent(openApp(ctx))
+                .addAction(0, "조퇴로 기록", act(ActionReceiver.EARLY, 41))
+                .addAction(0, "외근·업무 중", act(ActionReceiver.FIELD, 42)).build())
+        } catch (_: SecurityException) { }
+    }
+
     fun checkout(ctx: Context, r: DayRecord, c: Company, s: AppSettings) {
         val ot = overtimeMin(c, r)
         val pay = (ot / 60.0 * s.hourly(c, r.day.year) * c.overtimeRate).toInt()
@@ -85,6 +101,7 @@ object Scheduler {
     const val ACT_TRACK = "kr.worklife.TRACK"
     const val ACT_SETTLE = "kr.worklife.SETTLE"
     const val ACT_POLL = "kr.worklife.POLL"
+    const val ACT_LUNCH = "kr.worklife.LUNCH"
 
     private fun pi(ctx: Context, act: String, code: Int) = PendingIntent.getBroadcast(ctx, code,
         Intent(ctx, AlarmReceiver::class.java).setAction(act), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -117,6 +134,13 @@ object Scheduler {
             d.atTime(trackingStart(c, learned(ctx, c))).takeIf { it.isAfter(now) }
         }.firstOrNull()
         if (next != null) set(ctx, next, pi(ctx, ACT_TRACK, 1))
+        // 점심 끝 + 30분: 미복귀 확인 (근무일만)
+        val lunchNext = (0L..21L).asSequence().map { now.toLocalDate().plusDays(it) }.mapNotNull { d ->
+            val c = repo.companyOn(d) ?: return@mapNotNull null
+            if (!c.hasLocation || !HolidayCalendar(c).isWorkday(d)) return@mapNotNull null
+            d.atTime(hm(c.lunchEnd)).plusMinutes(30).takeIf { it.isAfter(now) }
+        }.firstOrNull()
+        if (lunchNext != null) set(ctx, lunchNext, pi(ctx, ACT_LUNCH, 4))
         set(ctx, now.toLocalDate().plusDays(1).atTime(0, 10), pi(ctx, ACT_SETTLE, 2))
         ensure(ctx)
     }
@@ -229,6 +253,7 @@ class AlarmReceiver : BroadcastReceiver() {
         Notif.init(ctx)
         when (intent.action) {
             Scheduler.ACT_TRACK -> Scheduler.ensure(ctx)
+            Scheduler.ACT_LUNCH -> runCatching { Engine.lunchReturnCheck(ctx) }
             Scheduler.ACT_POLL -> {
                 if (!Scheduler.shouldTrackNow(ctx)) { Scheduler.cancelPoll(ctx); return }
                 // 서비스가 죽었어도 알람이 직접 위치를 잡아 판정 (평일은 서비스도 재시작)
@@ -253,6 +278,29 @@ class AlarmReceiver : BroadcastReceiver() {
             }
         }
         Scheduler.scheduleAll(ctx)
+    }
+}
+
+/** 알림 버튼: 점심 후 미복귀 → 조퇴로 기록 / 외근 */
+class ActionReceiver : BroadcastReceiver() {
+    companion object {
+        const val EARLY = "kr.worklife.ACT_EARLY"
+        const val FIELD = "kr.worklife.ACT_FIELD"
+    }
+    override fun onReceive(ctx: Context, intent: Intent) {
+        val repo = Repo.get(ctx)
+        val d = java.time.LocalDate.now()
+        val c = repo.companyOn(d) ?: return
+        when (intent.action) {
+            EARLY -> {
+                val g = Engine.evaluate(ctx, d).tracker
+                val out = (g?.outsideSince ?: LocalDateTime.now()).toLocalTime().withSecond(0).withNano(0)
+                repo.saveDay(DayRecord(d, c.id, Status.WORK, hm(c.workStart), out, Source.MANUAL, "조퇴 (점심 후 미복귀)"))
+            }
+            FIELD -> Engine.setFieldWork(ctx, true, d)
+        }
+        runCatching { NotificationManagerCompat.from(ctx).cancel(15) }
+        Scheduler.cancelPoll(ctx)
     }
 }
 

@@ -303,4 +303,41 @@ class CoreTest {
         g.feedAll(listOf(mon("06:00", 20.0), mon("11:00", 20.0), mon("11:05", 300.0, "exit"), mon("15:10", 3000.0), mon("15:20", 3000.0)))
         assertEquals(monAt("11:00"), g.checkout); assertTrue(g.notes.any { "정시 전" in it })
     }
+
+    // ── 09: 점심 외출
+    @Test fun lunchOutingWithinWindow() {
+        val g = GeofenceTracker(c, s, LocalDate.of(2026, 10, 12))
+        g.feedAll(listOf(mon("06:00", 20.0), mon("12:05", 300.0, "exit"), mon("12:48", 30.0, "enter"), mon("15:00", 20.0)))
+        assertEquals(1, g.outings.size); assertTrue(g.outings[0].lunch); assertEquals(0, g.lunchOverMin)
+        assertTrue(g.notes.isEmpty())                       // 경고·메모 없음
+        assertNull(g.checkout)                               // 퇴근 아님
+    }
+    @Test fun lunchOverrun() {
+        val g = GeofenceTracker(c, s, LocalDate.of(2026, 10, 12))
+        g.feedAll(listOf(mon("06:00", 20.0), mon("12:10", 300.0, "exit"), mon("13:20", 30.0, "enter")))
+        assertEquals(20, g.lunchOverMin); assertTrue(g.notes.any { "20분 초과" in it })
+    }
+    @Test fun nonLunchOutingStillNoted() {
+        val g = GeofenceTracker(c, s, LocalDate.of(2026, 10, 12))
+        g.feedAll(listOf(mon("06:00", 20.0), mon("09:00", 300.0, "exit"), mon("09:40", 30.0, "enter")))
+        assertTrue(!g.outings[0].lunch); assertTrue(g.notes.any { "근무중 이탈" in it })
+    }
+    @Test fun outsideAfterLunchDetectable() {
+        val g = GeofenceTracker(c, s, LocalDate.of(2026, 10, 12))
+        g.feedAll(listOf(mon("06:00", 20.0), mon("12:10", 2000.0, "exit")))
+        assertEquals(monAt("12:10"), g.outsideSince); assertNull(g.checkout)
+    }
+    @Test fun lunchOverDeductOption() {
+        val d = LocalDate.of(2026, 10, 12)
+        val r = DayRecord(d, 1, Status.WORK, hm("06:00"), hm("15:00"), Source.AUTO, "", lunchOverMin = 30)
+        val off = calcPayroll(c, s, OCT, listOf(r), NOV1)
+        assertEquals(0, off.lunchOverDeduct)
+        val on = calcPayroll(c.copy(lunchOverDeduct = true), s, OCT, listOf(r), NOV1)
+        assertEquals(5160, on.lunchOverDeduct); assertEquals(off.gross - 5160, on.gross)
+    }
+    @Test fun fastExitAuto() {
+        assertEquals(1000.0, s.fastExitFor(c), 0.0)
+        assertEquals(2000.0, s.fastExitFor(c.copy(radiusM = 200.0)), 0.0)
+        assertEquals(1500.0, s.copy(fastExitM = 1500.0).fastExitFor(c), 0.0)
+    }
 }
