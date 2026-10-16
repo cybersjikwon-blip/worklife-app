@@ -21,13 +21,28 @@ import java.time.YearMonth
 import java.time.temporal.ChronoUnit
 
 @Composable
-fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: () -> Unit, goRecords: () -> Unit) {
+fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: () -> Unit, goRecords: () -> Unit, goFun: () -> Unit = {}) {
     val ctx = LocalContext.current
     var now by remember { mutableStateOf(LocalDateTime.now()) }
     LaunchedEffect(Unit) { while (true) { delay(30_000); now = LocalDateTime.now() } }
 
     val repo = Repo.get(ctx)
     val today = now.toLocalDate()
+    // 퇴사 상태: 재직 중인 회사가 없으면 안내만
+    val active = remember(version) { repo.activeCompany() }
+    if (active == null) {
+        Column(modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+            BigHeader("슬기로운 직장생활", "${today.monthValue}월 ${today.dayOfMonth}일 (${wd(today)})")
+            SCard(onClick = goSettings) {
+                Text("재직 중인 회사가 없어요", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text("위치 감지와 알림을 멈췄어요. 새 직장에 다니게 되면 설정 > 회사 이력 > [새 회사 등록]을 눌러주세요. 이전 기록과 급여 이력은 근무기록·급여 탭에서 볼 수 있어요.",
+                    fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
+                Button(onClick = goSettings, Modifier.padding(top = 12.dp)) { Text("새 회사 등록하러 가기") }
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+        return
+    }
     val data = remember(version, now) {
         val c = repo.currentCompany(); val s = repo.settings
         val period = periodContaining(c, today)
@@ -54,6 +69,27 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
 
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         BigHeader("슬기로운 직장생활", "${c.name} · ${today.monthValue}월 ${today.dayOfMonth}일 (${wd(today)})")
+
+        // ── 최초 입사일 확인 (앱을 재직 중간부터 쓰는 경우 연차·퇴직금이 틀어지지 않게)
+        if (!c.startConfirmed) SCard(color = MaterialTheme.colorScheme.primaryContainer) {
+            Text("최초 입사일을 확인해 주세요", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+            Text("연차·퇴직금 계산에 필요해요. 앱을 설치한 날이 아니라 실제로 입사한 날이에요. 지금 입사일: ${c.startDate}", fontSize = 14.sp)
+            Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton(onClick = { repo.saveCompany(c.copy(startConfirmed = true)); bump() }) { Text("맞아요") }
+                OutlinedButton(onClick = {
+                    pickDate(ctx, c.startDate) { d -> repo.saveCompany(c.copy(startDate = d, startConfirmed = true)); bump() }
+                }) { Text("입사일 고르기") }
+            }
+        }
+
+        // ── 점심 메뉴 바로가기 (점심 30분 전 ~ 점심 끝)
+        val nt = now.toLocalTime()
+        if (hol == null && !nt.isBefore(hm(c.lunchStart).minusMinutes(30)) && nt.isBefore(hm(c.lunchEnd))) SCard(onClick = goFun) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("오늘 점심 뭐 먹지?", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                Tag("메뉴 룰렛 돌리기 →", MaterialTheme.colorScheme.primary)
+            }
+        }
 
         // ── 경고/안내
         val upd = remember(version) { Updater.pending(ctx) }

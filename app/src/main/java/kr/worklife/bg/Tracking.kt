@@ -223,6 +223,7 @@ object Tracker {
         val rec = Engine.checkToday(ctx)
         if (rec?.checkOut != null) {
             if (rec.source != Source.MANUAL) notifyOnce(ctx, rec)
+            Widgets.updateAll(ctx)
             return true
         }
         val g = Engine.checkHoliday(ctx)
@@ -278,6 +279,7 @@ class AlarmReceiver : BroadcastReceiver() {
             }
         }
         Scheduler.scheduleAll(ctx)
+        Widgets.updateAll(ctx)
     }
 }
 
@@ -301,6 +303,7 @@ class ActionReceiver : BroadcastReceiver() {
         }
         runCatching { NotificationManagerCompat.from(ctx).cancel(15) }
         Scheduler.cancelPoll(ctx)
+        Widgets.updateAll(ctx)
     }
 }
 
@@ -335,10 +338,11 @@ class GeofenceReceiver : BroadcastReceiver() {
 object Geo {
     @SuppressLint("MissingPermission")
     fun register(ctx: Context) {
-        val c = Repo.get(ctx).currentCompany()
-        if (!c.hasLocation || !ctx.hasFineLoc() || !ctx.hasBgLoc()) return
         val pi = PendingIntent.getBroadcast(ctx, 7, Intent(ctx, GeofenceReceiver::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)
+        val c = Repo.get(ctx).activeCompany()
+        if (c == null) { runCatching { LocationServices.getGeofencingClient(ctx).removeGeofences(pi) }; return } // 퇴사 상태: 감지 중지
+        if (!c.hasLocation || !ctx.hasFineLoc() || !ctx.hasBgLoc()) return
         val fence = Geofence.Builder().setRequestId("work-${c.id}")
             .setCircularRegion(c.lat, c.lon, maxOf(100f, c.radiusM.toFloat()))
             .setExpirationDuration(Geofence.NEVER_EXPIRE)

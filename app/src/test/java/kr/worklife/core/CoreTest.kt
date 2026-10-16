@@ -340,4 +340,38 @@ class CoreTest {
         assertEquals(2000.0, s.fastExitFor(c.copy(radiusM = 200.0)), 0.0)
         assertEquals(1500.0, s.copy(fastExitM = 1500.0).fastExitFor(c), 0.0)
     }
+
+    // ── 10: 퇴직금
+    @Test fun severance() {
+        val cc = c.copy(startDate = LocalDate.of(2024, 10, 17))
+        val last = LocalDate.of(2026, 10, 16)
+        assertNull(severanceEstimate(c.copy(startDate = LocalDate.of(2026, 1, 1)), s, last, 6_000_000)) // 1년 미만
+        val sv = severanceEstimate(cc, s, last, 3L * 3_000_000)!!
+        assertEquals(730L, sv.tenureDays); assertEquals(92L, sv.days3m)   // 7/17~10/16
+        assertTrue(!sv.usedOrdinary)
+        assertEquals((9_000_000.0 / 92 * 30 * 730 / 365).toLong(), sv.amount)
+        val withBonus = severanceEstimate(cc.copy(annualBonus = 1_200_000), s, last, 3L * 3_000_000)!!
+        assertTrue(withBonus.amount > sv.amount)
+        // 최저임금 수준: 3개월 평균임금(달력일 기준)이 통상일급(시급×8)보다 낮으면 통상임금으로 (근로기준법 제2조②)
+        val low = severanceEstimate(cc, s, last, 3L * 2_256_880)!!
+        assertTrue(low.usedOrdinary); assertEquals((10320.0 * 8 * 30 * 730 / 365).toLong(), low.amount)
+    }
+
+    // ── 10: 사다리 · 룰렛
+    @Test fun ladderIsPermutation() {
+        repeat(200) { seed ->
+            val n = 2 + seed % 7
+            val lad = makeLadder(n, rnd = kotlin.random.Random(seed))
+            val ends = (0 until n).map { ladderPath(lad, it).second }
+            assertEquals((0 until n).toSet(), ends.toSet())                    // 결과가 겹치지 않음
+            lad.forEach { row -> row.zipWithNext().forEach { (a, b) -> assertTrue(!(a && b)) } } // 붙은 가로줄 없음
+            (0 until n - 1).forEach { g -> assertTrue(lad.any { it[g] }) }     // 모든 칸에 가로줄
+        }
+    }
+    @Test fun pickAvoidsRecent() {
+        val items = listOf("김치찌개", "짜장면", "돈까스")
+        repeat(50) { assertEquals("돈까스", pickAvoidingRecent(items, setOf("김치찌개", "짜장면"), kotlin.random.Random(it))) }
+        assertTrue(pickAvoidingRecent(items, items.toSet()) in items)
+        assertNull(pickAvoidingRecent(emptyList(), emptySet()))
+    }
 }

@@ -54,14 +54,76 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
     fun companiesIn(ym: YearMonth) = companies.filter { c -> periodOf(c, ym).days.any { c.activeOn(it) } }
 
     /** 이직: 기존 회사 마감 + 새 회사(근무조건은 복사, 위치는 비움) */
-    fun moveCompany(newName: String, start: LocalDate): Company {
-        val cur = companyOn(start.minusDays(1)) ?: currentCompany()
-        val list = companies.map { if (it.id == cur.id) it.copy(endDate = start.minusDays(1)) else it }
-        val nc = cur.copy(id = (companies.maxOf { it.id }) + 1, name = newName, startDate = start, endDate = null,
-            lat = 0.0, lon = 0.0, extraHolidays = emptySet(), extraWorkdays = emptySet())
+    /** 재직 중인 회사 (오늘 기준). 없으면 null = 퇴사 상태 */
+    fun activeCompany(): Company? = companyOn(LocalDate.now())
+
+    /**
+     * 회사 옮기기: 지금 회사는 prevEnd(마지막 근무일)로 퇴사 처리, 새 회사는 newStart 입사
+     * (퇴사일과 입사일 사이 공백 허용). 근무조건은 복사, 위치·휴무일·퇴직금 보조값은 비움
+     */
+    fun moveCompany(newName: String, prevEnd: LocalDate?, newStart: LocalDate): Company {
+        val base = (if (prevEnd != null) companyOn(prevEnd) else null) ?: companies.maxByOrNull { it.startDate } ?: Company()
+        val list = companies.map { if (prevEnd != null && it.id == base.id) it.copy(endDate = prevEnd) else it }
+        val nc = base.copy(id = (companies.maxOfOrNull { it.id } ?: 0) + 1, name = newName, startDate = newStart, endDate = null,
+            lat = 0.0, lon = 0.0, extraHolidays = emptySet(), extraWorkdays = emptySet(),
+            startConfirmed = true, annualBonus = 0, unusedLeavePay = 0)
         companies = list + nc
         return nc
     }
+
+    /** 퇴사: 마지막 근무일 지정 */
+    fun retire(cid: Long, lastDay: LocalDate) { companies = companies.map { if (it.id == cid) it.copy(endDate = lastDay) else it } }
+
+    /** 퇴사 취소 */
+    fun unretire(cid: Long) { companies = companies.map { if (it.id == cid) it.copy(endDate = null) else it } }
+
+    /** 퇴직 전 3개월 임금총액 (확정·직접입력 급여 > 기록으로 계산 > 기본급 추정). 두 번째 값 = 추정으로 채운 달 수 */
+    fun wagesBefore(c: Company, lastDay: LocalDate): Pair<Long, Int> {
+        val (from, to) = threeMonthWindow(lastDay)
+        val s = settings
+        val snaps = savedPays().filter { it.companyId == c.id }.associateBy { it.ym }
+        var total = 0.0; var estimated = 0
+        var ym = YearMonth.from(from)
+        while (!ym.isAfter(YearMonth.from(to))) {
+            val mStart = maxOf(ym.atDay(1), from); val mEnd = minOf(ym.atEndOfMonth(), to)
+            val share = (java.time.temporal.ChronoUnit.DAYS.between(mStart, mEnd) + 1).toDouble() / ym.lengthOfMonth()
+            val snap = snaps[ym]
+            val gross = if (snap != null) snap.gross.toDouble() else {
+                val p = periodOf(c, ym)
+                val stored = period(p, c.id)
+                if (stored.isEmpty()) estimated++
+                calcPayroll(c, s, p, buildPeriod(c, p, stored, LocalDate.now()), LocalDate.now()).gross.toDouble()
+            }
+            total += gross * share
+            ym = ym.plusMonths(1)
+        }
+        return total.toLong() to estimated
+    }
+
+    // ───────── 재미 탭 (점심 메뉴·돌림판) ─────────
+    var lunchMenus: List<String>
+        get() = strList("lunchMenus") ?: DEFAULT_MENUS
+        set(v) = putList("lunchMenus", v)
+    /** 최근 점심 결과 "날짜|메뉴" */
+    var lunchHistory: List<String>
+        get() = strList("lunchHist") ?: emptyList()
+        set(v) = putList("lunchHist", v.takeLast(30))
+    fun recentLunch(days: Long): Set<String> = lunchHistory.mapNotNull { e ->
+        val (d, m) = e.split("|", limit = 2).let { if (it.size == 2) it[0] to it[1] else return@mapNotNull null }
+        runCatching { LocalDate.parse(d) }.getOrNull()?.takeIf { !it.isBefore(LocalDate.now().minusDays(days)) }?.let { m }
+    }.toSet()
+    /** 저장한 돌림판: 이름 → 항목 */
+    var wheels: Map<String, List<String>>
+        get() = runCatching {
+            val o = JSONObject(prefs.getString("wheels", "{}")!!)
+            o.keys().asSequence().associateWith { k -> o.getJSONArray(k).let { a -> (0 until a.length()).map { a.getString(it) } } }
+        }.getOrDefault(emptyMap()).ifEmpty { mapOf("커피 쏠 사람" to listOf("나", "김대리", "박과장", "이주임")) }
+        set(v) { prefs.edit().putString("wheels", JSONObject().apply { v.forEach { (k, l) -> put(k, JSONArray(l)) } }.toString()).apply() }
+
+    private fun strList(k: String): List<String>? = prefs.getString(k, null)?.let { s ->
+        runCatching { JSONArray(s).let { a -> (0 until a.length()).map { a.getString(it) } } }.getOrNull()
+    }
+    private fun putList(k: String, v: List<String>) { prefs.edit().putString(k, JSONArray(v).toString()).apply() }
 
     var onboarded: Boolean
         get() = prefs.getBoolean("onboarded", false)
@@ -178,6 +240,9 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
     }
 
     companion object {
+        val DEFAULT_MENUS = listOf("김치찌개", "된장찌개", "제육볶음", "순두부찌개", "부대찌개", "비빔밥", "국밥", "칼국수", "냉면",
+            "불고기", "닭갈비", "짜장면", "짬뽕", "탕수육", "볶음밥", "돈까스", "초밥", "라멘", "우동", "덮밥",
+            "김밥", "떡볶이", "라면", "햄버거", "샌드위치", "파스타", "피자", "쌀국수", "샐러드", "도시락")
         @Volatile private var inst: Repo? = null
         fun get(ctx: Context): Repo = inst ?: synchronized(this) { inst ?: Repo(ctx.applicationContext).also { inst = it } }
 
@@ -190,6 +255,7 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
             put("pStart", c.periodStartDay); put("payDay", c.payDay); put("payOff", c.payMonthOffset); put("payAdj", c.payAdjust)
             put("prorate", c.prorateBy); put("bonusPartial", c.bonusOnPartial)
             put("lunchS", c.lunchStart); put("lunchE", c.lunchEnd); put("lunchDed", c.lunchOverDeduct)
+            put("startOk", c.startConfirmed); put("bonusY", c.annualBonus); put("leavePay", c.unusedLeavePay)
             put("leaveDays", c.annualLeaveDays); put("leaveBasis", c.leaveBasis); put("leaveCarry", c.leaveCarryover)
         }
 
@@ -208,7 +274,8 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
                 j.optInt("pStart", d.periodStartDay), j.optInt("payDay", d.payDay), j.optInt("payOff", d.payMonthOffset),
                 j.optString("payAdj", d.payAdjust), j.optString("prorate", d.prorateBy), j.optBoolean("bonusPartial", d.bonusOnPartial),
                 j.optInt("leaveDays", d.annualLeaveDays), j.optString("leaveBasis", d.leaveBasis), j.optDouble("leaveCarry", d.leaveCarryover),
-                j.optString("lunchS", d.lunchStart), j.optString("lunchE", d.lunchEnd), j.optBoolean("lunchDed", d.lunchOverDeduct))
+                j.optString("lunchS", d.lunchStart), j.optString("lunchE", d.lunchEnd), j.optBoolean("lunchDed", d.lunchOverDeduct),
+                j.optBoolean("startOk", false), j.optInt("bonusY", 0), j.optInt("leavePay", 0))
         }
 
         fun settingsToJson(s: AppSettings) = JSONObject().apply {

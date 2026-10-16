@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="w_bg">#FFFFFFFF</color>
+    <color name="w_green">#FFE6F6EC</color>
+    <color name="w_text">#FF111111</color>
+    <color name="w_sub">#FF6B6B70</color>
+    <color name="w_accent">#FFC2410C</color>
+    <string name="widget_small_desc">오늘 근무 상태</string>
+    <string name="widget_large_desc">오늘 상태·추가근무·급여일·연차 + 지금 퇴근</string>
+</resources>

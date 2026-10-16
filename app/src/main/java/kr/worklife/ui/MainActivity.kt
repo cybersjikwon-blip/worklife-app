@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -74,6 +75,7 @@ class MainActivity : ComponentActivity() {
     private fun afterReady() {
         runCatching { Scheduler.ensure(this) }
         runCatching { Updater.autoCheck(this, notify = false) { runOnUiThread { version.intValue++ } } }
+        runCatching { Widgets.updateAll(this) }
         // 앱을 열면 감시 중인 시간이면 즉시 위치 1회 확인 → 홈에 바로 반영
         runCatching { Tracker.oneShot(this) { runOnUiThread { version.intValue++ } } }
         version.intValue++
@@ -91,6 +93,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
+        runCatching { Widgets.updateAll(this) }
         stoppedAt = System.currentTimeMillis()
     }
 
@@ -131,13 +134,15 @@ fun SplashScreen() {
 fun AppRoot(version: Int, tab: Int, setTab: (Int) -> Unit, bump: () -> Unit) {
     var month by remember { mutableStateOf(YearMonth.now()) }
     val tabs = listOf("홈" to Icons.Filled.Home, "근무기록" to Icons.Filled.DateRange,
-        "급여" to Icons.Filled.List, "설정" to Icons.Filled.Settings)
+        "급여" to Icons.Filled.List, "재미" to Icons.Filled.Star, "설정" to Icons.Filled.Settings)
+    // 뒤로가기 상태: 홈에서 한 번 누르면 '대기', 대기 중 한 번 더 누르면 종료 (메시지 없음)
+    var armed by remember { mutableStateOf(false) }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
             NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                 tabs.forEachIndexed { i, (label, icon) ->
-                    NavigationBarItem(selected = tab == i, onClick = { setTab(i) },
+                    NavigationBarItem(selected = tab == i, onClick = { armed = false; setTab(i) },
                         icon = { Icon(icon, label) }, label = { Text(label) })
                 }
             }
@@ -145,15 +150,23 @@ fun AppRoot(version: Int, tab: Int, setTab: (Int) -> Unit, bump: () -> Unit) {
     ) { pad ->
         val m = Modifier.padding(pad)
         when (tab) {
-            0 -> HomeScreen(version, bump, m, goSettings = { setTab(3) }, goRecords = { setTab(1) })
+            0 -> HomeScreen(version, bump, m, goSettings = { armed = false; setTab(4) }, goRecords = { armed = false; setTab(1) },
+                goFun = { armed = false; setTab(3) })
             1 -> RecordsScreen(version, bump, month, { month = it }, m)
             2 -> PayScreen(version, bump, month, { month = it }, m)
+            3 -> FunScreen(m)
             else -> SettingsScreen(version, bump, m)
         }
     }
     UpdateDialogHost(bump)
 
-    // 뒤로가기: 다른 탭이면 홈으로, 홈에서 한 번 더 누르면 바로 종료 (확인 메시지 없음)
+    // 뒤로가기 (메시지 없음): 홈에서는 2번 → 종료 / 다른 메뉴에서는 1번 → 홈, 한 번 더 → 종료
     val act = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
-    BackHandler(enabled = true) { if (tab != 0) setTab(0) else act?.finish() }
+    BackHandler(enabled = true) {
+        when {
+            tab != 0 -> { setTab(0); armed = true }
+            armed -> act?.finish()
+            else -> armed = true
+        }
+    }
 }

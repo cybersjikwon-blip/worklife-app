@@ -51,6 +51,14 @@
         <receiver android:name=".bg.AlarmReceiver" android:exported="false" />
         <receiver android:name=".bg.GeofenceReceiver" android:exported="false" />
         <receiver android:name=".bg.ActionReceiver" android:exported="false" />
+        <receiver android:name=".bg.SmallWidget" android:exported="false" android:label="근무 상태 (작게)">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_small_info" />
+        </receiver>
+        <receiver android:name=".bg.LargeWidget" android:exported="false" android:label="근무 요약 (크게)">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_large_info" />
+        </receiver>
         <receiver android:name=".bg.BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

@@ -75,6 +75,10 @@ data class Company(
     val lunchStart: String = "11:30",   // 이 시간대에 나갔다 오면 '점심 외출'로만 표시
     val lunchEnd: String = "13:00",
     val lunchOverDeduct: Boolean = false, // 점심시간 넘겨 돌아온 시간 공제 (기본 꺼짐)
+    // ── 입사일 확인 · 퇴직금 보조 입력
+    val startConfirmed: Boolean = false,  // 최초 입사일을 사용자가 확인했는지 (앱을 재직 중간부터 쓰는 경우 대비)
+    val annualBonus: Int = 0,             // 연간 상여금 (퇴직금 평균임금에 3/12 반영)
+    val unusedLeavePay: Int = 0,          // 작년 미사용 연차수당 (3/12 반영)
 ) {
     fun inLunch(t: LocalTime) = !t.isBefore(hm(lunchStart)) && t.isBefore(hm(lunchEnd))
     val hasLocation get() = lat != 0.0 || lon != 0.0
@@ -658,3 +662,70 @@ fun trackingStart(c: Company, w: LearnedWindow?): LocalTime {
 /** 위치 확인 간격(분): 기본 base(정시 이후 10분), 학습 시간대 촘촘히 켜면 그 안에서 fast */
 fun pollIntervalMin(now: LocalTime, w: LearnedWindow?, base: Int = 10, fast: Int? = null): Int =
     if (fast != null && w != null && !now.isBefore(w.from) && !now.isAfter(w.to)) minOf(fast, base) else base
+
+// ─────────────────────────── 퇴직금 ───────────────────────────
+/**
+ * 퇴직금 = 1일 평균임금 × 30일 × (재직일수 ÷ 365)   (재직 1년 이상만)
+ * 1일 평균임금 = (퇴직 전 3개월 임금총액 + 연간상여금×3/12 + 연차수당×3/12) ÷ 그 3개월 총일수
+ * 평균임금이 통상임금(일급)보다 낮으면 통상임금으로 계산 (근로기준법)
+ */
+data class Severance(val tenureDays: Long, val wages3m: Long, val days3m: Long, val avgDaily: Double,
+                     val usedOrdinary: Boolean, val amount: Long, val estimatedMonths: Int)
+
+fun threeMonthWindow(lastDay: LocalDate): Pair<LocalDate, LocalDate> {
+    val retire = lastDay.plusDays(1)            // 퇴직일 = 마지막 근무일 다음 날
+    return retire.minusMonths(3) to lastDay
+}
+
+fun severanceEstimate(c: Company, s: AppSettings, lastDay: LocalDate, wages3m: Long, estimatedMonths: Int = 0): Severance? {
+    val tenure = ChronoUnit.DAYS.between(c.startDate, lastDay.plusDays(1))
+    if (tenure < 365) return null
+    val (from, to) = threeMonthWindow(lastDay)
+    val days = ChronoUnit.DAYS.between(from, to.plusDays(1)).coerceAtLeast(1)
+    val extra = (c.annualBonus + c.unusedLeavePay) * 3.0 / 12.0
+    var avg = (wages3m + extra) / days
+    val ordinaryDaily = s.baseFor(c, lastDay.year).toDouble() / MONTHLY_STD_HOURS * 8
+    val useOrd = avg < ordinaryDaily
+    if (useOrd) avg = ordinaryDaily
+    val amount = (avg * 30 * tenure / 365.0).toLong()
+    return Severance(tenure, wages3m, days, avg, useOrd, amount, estimatedMonths)
+}
+
+// ─────────────────────────── 사다리타기 ───────────────────────────
+/** rungs[row][gap] = gap번째 세로줄과 그 오른쪽 세로줄 사이에 가로줄이 있는지. 같은 줄에 붙은 가로줄은 만들지 않음 */
+fun makeLadder(people: Int, rows: Int = 12, rnd: kotlin.random.Random = kotlin.random.Random.Default): List<List<Boolean>> {
+    val n = people.coerceIn(2, 12)
+    val ladder = List(rows) { BooleanArray(n - 1) }
+    for (r in 0 until rows) for (g in 0 until n - 1) {
+        if (g > 0 && ladder[r][g - 1]) continue
+        ladder[r][g] = rnd.nextInt(100) < 45
+    }
+    // 모든 칸 사이에 가로줄이 최소 1개는 있게 (안 섞이는 사다리 방지)
+    for (g in 0 until n - 1) if (ladder.none { it[g] }) {
+        val r = (0 until rows).firstOrNull { (g == 0 || !ladder[it][g - 1]) && (g == n - 2 || !ladder[it][g + 1]) } ?: 0
+        ladder[r][g] = true
+        if (g > 0) ladder[r][g - 1] = false
+        if (g < n - 2) ladder[r][g + 1] = false
+    }
+    return ladder.map { it.toList() }
+}
+
+/** start번 사람이 내려가는 경로: (row, column) 목록과 도착 칸 */
+fun ladderPath(ladder: List<List<Boolean>>, start: Int): Pair<List<Pair<Int, Int>>, Int> {
+    var col = start
+    val path = mutableListOf(-1 to col)
+    for ((r, row) in ladder.withIndex()) {
+        path += r to col
+        if (col < row.size && row[col]) col++ else if (col > 0 && row[col - 1]) col--
+        path += r to col
+    }
+    path += ladder.size to col
+    return path to col
+}
+
+/** 최근 나온 항목은 빼고 고르기 (다 빠지면 전체에서) */
+fun pickAvoidingRecent(items: List<String>, recent: Set<String>, rnd: kotlin.random.Random = kotlin.random.Random.Default): String? {
+    if (items.isEmpty()) return null
+    val pool = items.filter { it !in recent }.ifEmpty { items }
+    return pool[rnd.nextInt(pool.size)]
+}

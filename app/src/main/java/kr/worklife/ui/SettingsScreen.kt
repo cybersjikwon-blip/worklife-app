@@ -32,28 +32,11 @@ fun SettingsScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
     val companies = remember(version) { repo.companies }
     var editId by remember { mutableStateOf(repo.currentCompany().id) }
     val company = companies.firstOrNull { it.id == editId } ?: repo.currentCompany()
-    var moving by remember { mutableStateOf(false) }
-
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         BigHeader("설정")
         key(company.id, version) { CompanyForm(company, bump) }
 
-        SCard {
-            CardTitle("회사 이력")
-            companies.sortedByDescending { it.startDate }.forEach { c ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(c.name, fontWeight = FontWeight.SemiBold)
-                        Text("${c.startDate} ~ ${c.endDate ?: "재직 중"}", fontSize = 12.sp)
-                    }
-                    if (c.id == company.id) Tag("편집 중", MaterialTheme.colorScheme.primary)
-                    else TextButton(onClick = { editId = c.id }) { Text("편집") }
-                }
-            }
-            Button(onClick = { moving = true }, Modifier.padding(top = 8.dp)) { Text("회사 옮기기 (이직)") }
-            Text("이직해도 이전 회사의 근무기록·급여 이력은 그대로 남아요.", fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
-        }
+        CompanyHistoryCard(companies, company, onEdit = { editId = it }, bump = bump, onNew = { editId = it })
 
         key(version) { PersonalForm(bump) }
         UpdateCard(version, bump)
@@ -68,12 +51,146 @@ fun SettingsScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
         Spacer(Modifier.height(24.dp))
     }
 
-    if (moving) MoveDialog(onDismiss = { moving = false }) { name, start ->
-        val nc = repo.moveCompany(name, start)
-        editId = nc.id; moving = false
-        Scheduler.scheduleAll(ctx); Geo.register(ctx); bump()
-        Toast.makeText(ctx, "새 회사 '${name}'를 등록했어요. 위치와 근무조건을 확인하세요.", Toast.LENGTH_LONG).show()
+}
+
+/** 회사 이력 + [퇴사] / [회사 옮기기] / [새 회사 등록] / [퇴사 취소] + 예상 퇴직금 */
+@Composable
+private fun CompanyHistoryCard(companies: List<Company>, editing: Company, onEdit: (Long) -> Unit, bump: () -> Unit, onNew: (Long) -> Unit) {
+    val ctx = LocalContext.current
+    val repo = Repo.get(ctx)
+    val today = LocalDate.now()
+    val active = repo.activeCompany()
+    val last = companies.maxByOrNull { it.startDate }
+    var retiring by remember { mutableStateOf(false) }
+    var moving by remember { mutableStateOf(false) }
+    var adding by remember { mutableStateOf(false) }
+
+    SCard {
+        CardTitle("회사 이력", trailing = { if (active == null) Tag("재직 중인 회사 없음", OtOrange) })
+        companies.sortedByDescending { it.startDate }.forEach { c ->
+            val ended = c.endDate != null && c.endDate.isBefore(today)
+            val sev = remember(c, editing) {
+                runCatching {
+                    val lastDay = c.endDate ?: today
+                    val (w, est) = repo.wagesBefore(c, lastDay)
+                    severanceEstimate(c, repo.settings, lastDay, w, est)
+                }.getOrNull()
+            }
+            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(c.name, fontWeight = FontWeight.SemiBold)
+                    Text("${c.startDate} ~ ${c.endDate ?: "재직 중"}" + (if (!c.startConfirmed) " · 입사일 확인 필요" else ""), fontSize = 12.sp,
+                        color = if (!c.startConfirmed) OtOrange else MaterialTheme.colorScheme.onSurface)
+                    if (sev != null) Text((if (c.endDate == null) "오늘 퇴사 시 " else "") + "예상 퇴직금 ${won(sev.amount.toInt())}" +
+                            (if (sev.estimatedMonths > 0) " (추정 포함)" else ""), fontSize = 12.sp, color = OkGreen)
+                }
+                if (c.id == editing.id) Tag("편집 중", MaterialTheme.colorScheme.primary)
+                else TextButton(onClick = { onEdit(c.id) }) { Text("편집") }
+            }
+            if (ended && c.id == last?.id && active == null) TextButton(onClick = {
+                repo.unretire(c.id); Scheduler.scheduleAll(ctx); Geo.register(ctx); bump()
+                Toast.makeText(ctx, "퇴사를 취소했어요", Toast.LENGTH_SHORT).show()
+            }) { Text("퇴사 취소") }
+        }
+        Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (active != null) {
+                OutlinedButton(onClick = { retiring = true }) { Text("퇴사") }
+                Button(onClick = { moving = true }) { Text("회사 옮기기") }
+            } else Button(onClick = { adding = true }) { Text("새 회사 등록") }
+        }
+        Text("퇴사·이직해도 이전 회사의 근무기록·급여 이력은 그대로 남아요. 재직 중인 회사가 없으면 위치 감지·알림이 멈춰요.",
+            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f), modifier = Modifier.padding(top = 6.dp))
     }
+
+    if (retiring && active != null) RetireDialog(active, onDismiss = { retiring = false }) { lastDay, bonus, leavePay ->
+        repo.saveCompany(active.copy(annualBonus = bonus, unusedLeavePay = leavePay))
+        repo.retire(active.id, lastDay)
+        retiring = false
+        Scheduler.scheduleAll(ctx); Geo.register(ctx); bump()
+        Toast.makeText(ctx, "${active.name} 퇴사(마지막 근무일 $lastDay)로 처리했어요. 수고 많으셨습니다!", Toast.LENGTH_LONG).show()
+    }
+    if (moving && active != null) CompanyDialog("회사 옮기기", prevName = active.name, onDismiss = { moving = false }) { name, prevEnd, start ->
+        val nc = repo.moveCompany(name, prevEnd, start)
+        moving = false; onNew(nc.id)
+        Scheduler.scheduleAll(ctx); Geo.register(ctx); bump()
+        Toast.makeText(ctx, "새 회사 '$name'를 등록했어요. 위치와 근무조건을 확인하세요.", Toast.LENGTH_LONG).show()
+    }
+    if (adding) CompanyDialog("새 회사 등록", prevName = null, onDismiss = { adding = false }) { name, _, start ->
+        val nc = repo.moveCompany(name, null, start)
+        adding = false; onNew(nc.id)
+        Scheduler.scheduleAll(ctx); Geo.register(ctx); bump()
+        Toast.makeText(ctx, "'$name'를 등록했어요. 위치와 근무조건을 확인하세요.", Toast.LENGTH_LONG).show()
+    }
+}
+
+@Composable
+private fun RetireDialog(c: Company, onDismiss: () -> Unit, onSave: (LocalDate, Int, Int) -> Unit) {
+    val ctx = LocalContext.current
+    val repo = Repo.get(ctx)
+    var lastDay by remember { mutableStateOf(LocalDate.now()) }
+    var bonus by remember { mutableStateOf(if (c.annualBonus > 0) c.annualBonus.toString() else "") }
+    var leave by remember { mutableStateOf(if (c.unusedLeavePay > 0) c.unusedLeavePay.toString() else "") }
+    val bi = bonus.filter { it.isDigit() }.toIntOrNull() ?: 0
+    val li = leave.filter { it.isDigit() }.toIntOrNull() ?: 0
+    val sev = remember(lastDay, bi, li) {
+        runCatching {
+            val cc = c.copy(annualBonus = bi, unusedLeavePay = li)
+            val (w, est) = repo.wagesBefore(cc, lastDay)
+            severanceEstimate(cc, repo.settings, lastDay, w, est)
+        }.getOrNull()
+    }
+    val tenure = java.time.temporal.ChronoUnit.DAYS.between(c.startDate, lastDay.plusDays(1))
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("${c.name} 퇴사") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                OutlinedButton(onClick = { pickDate(ctx, lastDay) { lastDay = it } }) { Text("마지막 근무일 $lastDay") }
+                Text("입사 ${c.startDate} · 재직 ${tenure / 365}년 ${tenure % 365}일" + (if (!c.startConfirmed) " (입사일 확인 필요)" else ""),
+                    fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
+                Field("연간 상여금 (원, 선택)", bonus, { bonus = it }, number = true, hint = "3/12만큼 평균임금에 반영")
+                Field("작년 미사용 연차수당 (원, 선택)", leave, { leave = it }, number = true, hint = "3/12만큼 반영")
+                if (sev == null) Text("재직 1년 미만이라 퇴직금 대상이 아니에요.", fontSize = 14.sp, color = OtOrange)
+                else {
+                    Text("예상 퇴직금 ${won(sev.amount.toInt())}", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = OkGreen,
+                        modifier = Modifier.padding(top = 8.dp))
+                    Text("퇴직 전 3개월(${sev.days3m}일) 임금 ${won(sev.wages3m.toInt())} → 1일 평균 ${won(sev.avgDaily.toInt())}" +
+                            (if (sev.usedOrdinary) " (평균임금이 통상임금보다 낮아 통상일급 적용)" else "") +
+                            "\n× 30일 × 재직 ${sev.tenureDays}일 ÷ 365 · 세전 금액" +
+                            (if (sev.estimatedMonths > 0) "\n※ 앱 기록이 없는 ${sev.estimatedMonths}개월은 기본급으로 추정했어요. 급여 탭 [실제 금액 입력]으로 정확하게 바꿀 수 있어요." else ""),
+                        fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .7f))
+                }
+                Text("퇴사하면 다음 날부터 위치 감지·알림이 멈추고 기록은 그대로 남아요. 나중에 [퇴사 취소]도 할 수 있어요.",
+                    fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(lastDay, bi, li) }, enabled = !lastDay.isBefore(c.startDate)) { Text("퇴사 처리") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } })
+}
+
+/** 회사 옮기기(prevName 있음) / 새 회사 등록(prevName 없음) */
+@Composable
+private fun CompanyDialog(title: String, prevName: String?, onDismiss: () -> Unit, onSave: (String, LocalDate?, LocalDate) -> Unit) {
+    val ctx = LocalContext.current
+    var name by remember { mutableStateOf("") }
+    var start by remember { mutableStateOf(LocalDate.now()) }
+    var prevEnd by remember { mutableStateOf(LocalDate.now().minusDays(1)) }
+    val ok = name.isNotBlank() && (prevName == null || !start.isBefore(prevEnd.plusDays(1)))
+    AlertDialog(onDismissRequest = onDismiss, title = { Text(title) },
+        text = {
+            Column {
+                if (prevName != null) {
+                    Text("$prevName 마지막 근무일", fontSize = 13.sp)
+                    OutlinedButton(onClick = { pickDate(ctx, prevEnd) { prevEnd = it } }) { Text("$prevEnd") }
+                }
+                Field("새 회사 이름", name, { name = it })
+                Text("새 회사 최초 입사일", fontSize = 13.sp)
+                OutlinedButton(onClick = { pickDate(ctx, start) { start = it } }) { Text("$start") }
+                if (prevName != null && start.isBefore(prevEnd.plusDays(1))) Text("입사일이 이전 회사 마지막 근무일보다 빨라요", fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+                Text((if (prevName != null) "퇴사일과 입사일 사이에 쉬는 기간이 있어도 돼요. " else "") +
+                        "근무조건은 그대로 복사돼요. 회사 위치는 새로 설정하세요.", fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(name.trim(), if (prevName != null) prevEnd else null, start) }, enabled = ok) { Text("등록") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } })
 }
 
 @Composable
@@ -117,7 +234,7 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
         CardTitle("회사", trailing = { if (c.endDate == null) Tag("현재 회사", OkGreen) })
         Field("회사 이름", name, { name = it })
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { pickDate(ctx, start) { start = it } }, Modifier.weight(1f)) { Text("입사 $start", fontSize = 13.sp) }
+            OutlinedButton(onClick = { pickDate(ctx, start) { start = it } }, Modifier.weight(1f)) { Text("최초 입사 $start", fontSize = 13.sp) }
             OutlinedButton(onClick = { pickDate(ctx, end ?: LocalDate.now()) { end = it } }, Modifier.weight(1f)) {
                 Text(if (end == null) "퇴사일 없음" else "퇴사 $end", fontSize = 13.sp)
             }
@@ -264,7 +381,8 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
                 payMonthOffset = payOff, payAdjust = payAdj, prorateBy = prorate, bonusOnPartial = bonusPartial,
                 annualLeaveDays = if (leaveAuto) -1 else leaveDays.toIntOrNull()?.coerceIn(0, 60) ?: 15,
                 leaveBasis = leaveBasis, leaveCarryover = carry.toDoubleOrNull()?.coerceIn(0.0, 60.0) ?: 0.0,
-                lunchStart = lunchS.hhmm(), lunchEnd = lunchE.hhmm(), lunchOverDeduct = lunchDed)
+                lunchStart = lunchS.hhmm(), lunchEnd = lunchE.hhmm(), lunchOverDeduct = lunchDed,
+                startConfirmed = c.startConfirmed || start != c.startDate)
         }
 
         /** 저장 + 근무시간·휴일이 바뀌었으면 근무기록을 새 기준으로 다시 맞춤 */
@@ -465,40 +583,17 @@ private fun PermRow(label: String, ok: Boolean, action: String, onClick: () -> U
 }
 
 @Composable
-private fun MoveDialog(onDismiss: () -> Unit, onSave: (String, LocalDate) -> Unit) {
-    val ctx = LocalContext.current
-    var name by remember { mutableStateOf("") }
-    var start by remember { mutableStateOf(LocalDate.now()) }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("회사 옮기기") },
-        text = {
-            Column {
-                Text("지금 회사는 입사일 전날로 퇴사 처리되고, 근무조건은 새 회사로 복사돼요. 위치는 새로 설정하세요.", fontSize = 13.sp)
-                Field("새 회사 이름", name, { name = it })
-                OutlinedButton(onClick = { pickDate(ctx, start) { start = it } }) { Text("입사일 $start") }
-            }
-        },
-        confirmButton = { TextButton(onClick = { onSave(name.trim(), start) }, enabled = name.isNotBlank()) { Text("등록") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } })
-}
-
-
-@Composable
 private fun UpdateCard(version: Int, bump: () -> Unit) {
     val ctx = LocalContext.current
     val act = ctx as? android.app.Activity
-    var repoName by remember { mutableStateOf(Updater.repo(ctx)) }
-    var token by remember { mutableStateOf(Updater.token(ctx)) }
     var status by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     val found = remember(version) { Updater.pending(ctx) }
 
     SCard {
         CardTitle("앱 업데이트", trailing = { Tag("현재 ${Updater.currentName(ctx)}", MaterialTheme.colorScheme.primary) })
-        Field("GitHub 저장소 (아이디/저장소)", repoName, { repoName = it })
-        Field("토큰 (비공개 저장소일 때만)", token, { token = it }, hint = "Contents 읽기 전용 토큰 · 이 폰에만 저장돼요")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = {
-                Updater.save(ctx, repoName, token)
                 busy = true; status = "확인 중…"
                 Thread {
                     val r = runCatching { Updater.check(ctx) }
