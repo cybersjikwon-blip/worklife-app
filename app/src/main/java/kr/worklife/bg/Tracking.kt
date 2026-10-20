@@ -240,6 +240,7 @@ object Tracker {
         p.edit().putString(key, v).apply()
         val repo = Repo.get(ctx)
         repo.companies.firstOrNull { it.id == rec.companyId }?.let { Notif.checkout(ctx, rec, it, repo.settings) }
+        if (rec.source != Source.NEEDS_CHECK) Voice.checkout(ctx)
     }
 
     /** 앱을 열었을 때 등: 즉시 1회 위치 확인 */
@@ -253,7 +254,7 @@ class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         Notif.init(ctx)
         when (intent.action) {
-            Scheduler.ACT_TRACK -> Scheduler.ensure(ctx)
+            Scheduler.ACT_TRACK -> { Scheduler.ensure(ctx); runCatching { Geo.register(ctx) } } // 지오펜스가 지워졌을 때 대비 매일 재등록
             Scheduler.ACT_LUNCH -> runCatching { Engine.lunchReturnCheck(ctx) }
             Scheduler.ACT_POLL -> {
                 if (!Scheduler.shouldTrackNow(ctx)) { Scheduler.cancelPoll(ctx); return }
@@ -331,7 +332,10 @@ class GeofenceReceiver : BroadcastReceiver() {
         if (done) { Scheduler.cancelPoll(ctx); return }
         Scheduler.ensure(ctx)
         // 회사를 벗어나면 2분 뒤 딱 1번 재확인 → 퇴근 시각을 빨리 확정 (계속 2분마다가 아님)
-        if (ev.geofenceTransition == Geofence.GEOFENCE_TRANSITION_EXIT && Scheduler.shouldTrackNow(ctx)) Scheduler.schedulePoll(ctx, 2)
+        if (ev.geofenceTransition == Geofence.GEOFENCE_TRANSITION_EXIT && Scheduler.shouldTrackNow(ctx)) {
+            Scheduler.schedulePoll(ctx, 2)
+            Scheduler.startTracking(ctx) // 서비스가 죽어 있었으면 다시 살려서 이어서 확인
+        }
     }
 }
 

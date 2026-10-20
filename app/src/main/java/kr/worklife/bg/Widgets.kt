@@ -132,6 +132,7 @@ object Widgets {
         repo.saveDay(rec)
         Scheduler.cancelPoll(ctx)
         Notif.checkout(ctx, rec, c, repo.settings)
+        Voice.checkout(ctx)
     }
 }
 

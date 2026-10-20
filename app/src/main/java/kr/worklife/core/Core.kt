@@ -233,12 +233,38 @@ class GeofenceTracker(private val c: Company, private val s: AppSettings, val da
 
     fun distance(smp: LocSample) = haversineM(c.lat, c.lon, smp.lat, smp.lon)
 
+    /**
+     * 회사 안(true) / 밖(false) / 판단 보류(null)
+     *  - 오차가 커도 '확실히 밖'(거리-오차 > 반경)이면 밖: 차·실외에서 받은 대략적 위치도 버리지 않음
+     *  - 건물 안이라 오차가 조금 큰(≤ 약한기준) 위치도 반경 안이면 '안'으로 인정 → 회사 확인 기록이 비지 않게
+     *  - OS 지오펜스 이탈/진입 알림은 OS 판단을 우선
+     */
     private fun classify(smp: LocSample): Boolean? {
-        if (smp.accuracy > s.maxAccuracyM) return null
         val d = distance(smp)
-        if (d + smp.accuracy <= c.radiusM || d <= c.radiusM * 0.5) return true
-        if (d - smp.accuracy > c.radiusM) return false
+        val acc = smp.accuracy
+        if (smp.kind == "exit" && d > c.radiusM) return false
+        if (smp.kind == "enter" && d <= c.radiusM + acc) return true
+        if (d - acc > c.radiusM) return false
+        if (acc > s.maxAccuracyM) {
+            return if (d <= c.radiusM && acc <= weakAccuracyM()) true else null
+        }
+        if (d + acc <= c.radiusM || d <= c.radiusM * 0.5) return true
         return null
+    }
+
+    /** 실내 등에서 '회사 안'으로 인정할 수 있는 최대 오차 */
+    private fun weakAccuracyM() = maxOf(s.maxAccuracyM * 3, c.radiusM * 1.5)
+
+    /** 오늘 회사 확인 기록 없이 정시 이후 밖에서만 잡힌 경우: 퇴근 시각을 알 수 없어 확인 요청 */
+    var noInsideToday = false; private set
+
+    /** [퇴근 취소 · 아직 근무 중]: 이 시각에 회사에 있는 것으로 보고 판정을 다시 시작 */
+    fun resumeAt(t: LocalDateTime) {
+        checkout = null; outSince = null; outFirst = null; outCount = 0
+        estimated = false; uncertain = false; noInsideToday = false
+        if (firstInside == null) firstInside = t
+        lastInside = t
+        notes += "퇴근 취소 ${t.toLocalTime().hhmm()} (근무 계속)"
     }
 
     fun feed(smp: LocSample): LocalDateTime? {
@@ -264,12 +290,27 @@ class GeofenceTracker(private val c: Company, private val s: AppSettings, val da
             outSince = null; outFirst = null; outCount = 0
             return null
         }
-        val li = lastInside ?: return null // 출근 전 이동중
+        val far = distance(smp) - smp.accuracy >= s.fastExitFor(c)
+        val li = lastInside ?: run {
+            // 오늘 회사 확인 기록이 하나도 없는데 정시 이후 확실히 멀리 있음 → 놓친 퇴근. 정시로 임시 기록 + 확인 요청
+            if (!holiday && !smp.ts.isBefore(endDt)) {
+                if (outSince == null) outSince = smp.ts
+                outCount++
+                val away = ChronoUnit.MINUTES.between(outSince, smp.ts)
+                if (far || (outCount >= s.exitConfirmSamples && away >= s.exitConfirmMin)) {
+                    noInsideToday = true; uncertain = true
+                    notes += "오늘 회사 위치 확인 기록 없음 (${smp.ts.toLocalTime().hhmm()} 회사 밖 확인) → 퇴근 시각 확인 필요"
+                    checkout = endDt
+                }
+            }
+            return checkout
+        }
         if (outSince == null) { outSince = smp.ts; outFirst = smp }
         outCount++
         val away = ChronoUnit.SECONDS.between(outSince, smp.ts) / 60.0
-        val far = distance(smp) >= s.fastExitFor(c)
-        if ((holiday || !smp.ts.isBefore(endDt)) && outCount >= s.exitConfirmSamples && (away >= s.exitConfirmMin || far)) {
+        // 아주 멀리(빠른 이탈 거리) 확인되면 1회로 확정, OS 이탈 알림도 1회로 인정(10분 경과 시)
+        val need = if (far || smp.kind == "exit") 1 else s.exitConfirmSamples
+        if ((holiday || !smp.ts.isBefore(endDt)) && outCount >= need && (away >= s.exitConfirmMin || far)) {
             var co = departure(li)
             if (holiday) { checkout = co; return checkout }
             if (co.isBefore(endDt)) {
@@ -281,14 +322,18 @@ class GeofenceTracker(private val c: Company, private val s: AppSettings, val da
         return checkout
     }
 
-    fun feedAll(list: List<LocSample>): LocalDateTime? {
-        list.sortedBy { it.ts }.forEach { feed(it) }
+    fun feedAll(list: List<LocSample>, resume: LocalDateTime? = null): LocalDateTime? {
+        val sorted = list.sortedBy { it.ts }
+        if (resume == null || resume.toLocalDate() != day) { sorted.forEach { feed(it) }; return checkout }
+        sorted.filter { it.ts.isBefore(resume) }.forEach { feed(it) }
+        resumeAt(resume)
+        sorted.filter { !it.ts.isBefore(resume) }.forEach { feed(it) }
         return checkout
     }
 
     /** 하루 마감: (퇴근시각, 근거) */
     fun finalize(): Pair<LocalDateTime, Source> {
-        checkout?.let { return it to Source.AUTO }
+        checkout?.let { return it to (if (uncertain) Source.NEEDS_CHECK else Source.AUTO) }
         val li = lastInside ?: run { notes += "위치 기록 없음 → 정시 퇴근 처리"; return endDt to Source.DEFAULT }
         if (holiday) return (if (outSince != null) departure(li) else li) to (if (outSince != null && !uncertain) Source.AUTO else Source.NEEDS_CHECK)
         if (outSince != null) {

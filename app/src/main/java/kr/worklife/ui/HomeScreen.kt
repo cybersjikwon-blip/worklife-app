@@ -136,7 +136,17 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
         val working = hol == null && (title == "근무 중" || title.startsWith("연장 근무 중") || title == "퇴근 감지 중" ||
             (field && now.toLocalTime().isBefore(hm(c.workEnd)) && now.toLocalTime().isAfter(hm(c.workStart))))
         SCard(color = if (working) WorkingGreen else null) {
-            CardTitle("오늘", trailing = { if (working) Tag(if (field) "외근" else "근무 중", OkGreen) })
+            var voiceOn by remember { mutableStateOf(Voice.isOn(ctx)) }
+            CardTitle("오늘", trailing = {
+                if (working) Tag(if (field) "외근" else "근무 중", OkGreen)
+                // 퇴근 음성 안내 켜기/끄기 (켜면 퇴근 순간 "퇴근합니다~!")
+                if (hol == null) Surface(onClick = { voiceOn = !voiceOn; Voice.set(ctx, voiceOn) },
+                    shape = androidx.compose.foundation.shape.CircleShape,
+                    color = if (voiceOn) OkGreen.copy(alpha = .18f) else MaterialTheme.colorScheme.onSurface.copy(alpha = .06f),
+                    modifier = Modifier.padding(start = 8.dp).size(36.dp)) {
+                    Box(contentAlignment = Alignment.Center) { Text(if (voiceOn) "🔊" else "🔇", fontSize = 17.sp) }
+                }
+            })
             Text(title, fontSize = 24.sp, fontWeight = FontWeight.Bold)
             Text(sub, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f), modifier = Modifier.padding(top = 4.dp))
             // 점심 외출 표시
@@ -153,6 +163,8 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
                 Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilledTonalButton(onClick = {
                         repo.saveDay(DayRecord(today, c.id, Status.WORK, hm(c.workStart), LocalTime.now().withSecond(0).withNano(0), Source.MANUAL, "수동 퇴근"))
+                        Scheduler.cancelPoll(ctx)
+                        Voice.checkout(ctx)
                         bump()
                     }, enabled = data.rec?.checkOut == null && now.toLocalTime().isAfter(hm(c.workStart))) { Text("지금 퇴근") }
                     OutlinedButton(onClick = {
@@ -161,6 +173,11 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
                         }
                     }) { Text("퇴근시각 입력") }
                 }
+                // 퇴근이 잘못 잡혔을 때: 지우고 지금부터 다시 감지
+                if (data.rec?.checkOut != null && data.rec.status == Status.WORK && !field)
+                    TextButton(onClick = { Engine.resumeWork(ctx); Tracker.oneShot(ctx) { bump() }; bump() }, contentPadding = PaddingValues(0.dp)) {
+                        Text("퇴근 취소 · 아직 근무 중이에요", fontSize = 13.sp)
+                    }
                 // 외근: 그날은 위치로 판정하지 않음
                 if (field) TextButton(onClick = { Engine.setFieldWork(ctx, false); bump() }, contentPadding = PaddingValues(0.dp)) {
                     Text("외근 취소 (위치로 다시 판정)", fontSize = 13.sp)

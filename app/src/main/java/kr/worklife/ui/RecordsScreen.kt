@@ -136,6 +136,12 @@ fun EditDayDialog(c: Company, r: DayRecord, onDismiss: () -> Unit, onSave: (DayR
                     if (ot > 0) Text("연장 ${hmShort(ot)}", color = OtOrange, modifier = Modifier.padding(top = 6.dp))
                     if (co.isBefore(ci)) Text("퇴근이 출근보다 빨라요", color = MaterialTheme.colorScheme.error)
                 }
+                // 기록 이력: 이 날 기록이 어디서(자동/위젯/홈 버튼/알림…) 저장·삭제됐는지
+                val hist = remember(r) { kr.worklife.data.Repo.get(ctx).dayLog(r.day) }
+                if (hist.isNotEmpty()) {
+                    Text("기록 이력", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
+                    hist.takeLast(6).forEach { Text(it, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f)) }
+                }
                 Field("메모", note, { note = it })
                 LocLog(c, r.day)
             }

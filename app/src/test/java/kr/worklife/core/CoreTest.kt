@@ -374,4 +374,40 @@ class CoreTest {
         assertTrue(pickAvoidingRecent(items, items.toSet()) in items)
         assertNull(pickAvoidingRecent(emptyList(), emptySet()))
     }
+
+    // ── 11: 퇴근 놓침 대비
+    @Test fun indoorPoorAccuracyCountsInside() {
+        // 실내라 오차 120m인 위치만 있어도 회사 안으로 인정 → 16:50 퇴근 감지
+        val g = tr()
+        g.feedAll(listOf(smp("15:05", 40.0, 120.0), smp("16:40", 30.0, 140.0), smp("17:00", 3000.0, 80.0), smp("17:10", 5000.0, 300.0)))
+        assertTrue(g.firstInside != null)
+        assertTrue(g.checkout != null)
+        assertTrue(!g.checkout!!.isBefore(at("16:40")) && g.checkout!!.isBefore(at("17:01")))
+    }
+    @Test fun roughFarSampleNotIgnored() {
+        // 차 안에서 오차 400m 위치라도 8km면 확실히 밖 → 1회로 확정
+        val g = tr()
+        g.feedAll(inside("16:30") + smp("16:45", 8000.0, 400.0))
+        assertTrue(g.checkout != null)
+    }
+    @Test fun noInsideTodayAsksCheck() {
+        // 오늘 회사 확인 기록이 하나도 없이 정시 이후 멀리서만 잡힘 → 정시로 임시 + 확인 필요
+        val g = tr()
+        g.feedAll(listOf(smp("17:30", 6000.0, 20.0)))
+        assertEquals(at("15:00"), g.checkout)
+        assertTrue(g.uncertain && g.noInsideToday)
+        assertEquals(Source.NEEDS_CHECK, g.finalize().second)
+    }
+    @Test fun noInsideBeforeEndIgnored() {
+        val g = tr()
+        g.feedAll(listOf(smp("05:00", 6000.0), smp("05:30", 6000.0)))
+        assertNull(g.checkout)
+    }
+    @Test fun resumeAfterWrongCheckout() {
+        // 15:20에 잘못 퇴근 확정 → 15:30 [퇴근 취소] → 17:00에 다시 나감 → 17:00 근처로 확정
+        val list = inside("15:00") + listOf(smp("15:10", 3000.0), smp("15:25", 3000.0), smp("16:00", 20.0), smp("16:55", 20.0), smp("17:05", 3000.0), smp("17:16", 3000.0))
+        val a = tr(); a.feedAll(list); assertTrue(a.checkout!!.isBefore(at("15:30")))
+        val b = tr(); b.feedAll(list, resume = at("15:30"))
+        assertTrue(b.checkout != null && !b.checkout!!.isBefore(at("16:55")))
+    }
 }

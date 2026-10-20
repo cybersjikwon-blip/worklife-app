@@ -131,6 +131,8 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
 
     // ───────── 근태 ─────────
     fun saveDay(r: DayRecord) {
+        logDay(r.day, "저장 ${r.status.label} ${r.checkIn?.hhmm() ?: "-"}~${r.checkOut?.hhmm() ?: "-"} [${r.source.label}]" +
+            (if (r.note.isNotBlank()) " ${r.note.take(40)}" else "") + " ← ${caller()}")
         writableDatabase.insertWithOnConflict("days", null, ContentValues().apply {
             put("day", r.day.toString()); put("company", r.companyId); put("status", r.status.name)
             put("ci", r.checkIn?.hhmm()); put("co", r.checkOut?.hhmm()); put("src", r.source.name); put("note", r.note); put("lov", r.lunchOverMin)
@@ -138,6 +140,7 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
     }
 
     fun deleteDay(d: LocalDate, companyId: Long) {
+        logDay(d, "삭제 ← ${caller()}")
         writableDatabase.delete("days", "day=? AND company=?", arrayOf(d.toString(), companyId.toString()))
     }
 
@@ -211,7 +214,46 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
         }
 
     /** 위치 기록은 60일만 보관 (근태 기록은 영구) */
-    fun pruneLocs() { writableDatabase.delete("locs", "ts < ?", arrayOf(LocalDate.now().minusDays(60).toString())) }
+    fun pruneLocs() {
+        writableDatabase.delete("locs", "ts < ?", arrayOf(LocalDate.now().minusDays(60).toString()))
+        val old = LocalDate.now().minusDays(60).toString()
+        val e = prefs.edit()
+        prefs.all.keys.filter { (it.startsWith("dlog-") || it.startsWith("resume-")) && it.substringAfter("-") < old }.forEach { e.remove(it) }
+        e.apply()
+    }
+
+    // ───────── 기록 이력 (누가·언제 저장/삭제했는지: 퇴근이 엉뚱하게 잡혔을 때 원인 확인용) ─────────
+    private fun caller(): String {
+        val names = mapOf("checkoutNow" to "위젯 [지금 퇴근]", "checkToday" to "자동 판정", "settlePast" to "지난 날 마감",
+            "reevaluateOnUpgrade" to "업데이트 후 재판정", "reapplyCompany" to "근무시간 변경 반영", "setFieldWork" to "외근",
+            "resumeWork" to "퇴근 취소", "onReceive" to "알림 버튼")
+        val st = Throwable().stackTrace
+        for (f in st.drop(2)) {
+            val m = f.methodName.substringBefore('$').substringBefore('-')
+            names[m]?.let { return it }
+            if (f.className.contains("HomeScreen")) return "홈 화면 버튼"
+            if (f.className.contains("RecordsScreen")) return "근무기록 수정"
+            if (f.className.contains("SettingsScreen")) return "설정"
+        }
+        return st.getOrNull(2)?.let { "${it.className.substringAfterLast('.')}.${it.methodName}" } ?: "?"
+    }
+
+    fun logDay(d: LocalDate, msg: String) {
+        val key = "dlog-$d"
+        val lines = (prefs.getString(key, "") ?: "").lines().filter { it.isNotBlank() }.takeLast(14)
+        prefs.edit().putString(key, (lines + "${java.time.LocalTime.now().withNano(0)} $msg").joinToString("\n")).apply()
+    }
+
+    fun dayLog(d: LocalDate): List<String> = (prefs.getString("dlog-$d", "") ?: "").lines().filter { it.isNotBlank() }
+
+    /** [퇴근 취소] 시각 (그 시각부터 다시 판정) */
+    fun resumeAt(d: LocalDate): java.time.LocalDateTime? = prefs.getString("resume-$d", null)?.let { runCatching { java.time.LocalDateTime.parse(it) }.getOrNull() }
+    fun setResume(d: LocalDate, t: java.time.LocalDateTime?) { prefs.edit().apply { if (t == null) remove("resume-$d") else putString("resume-$d", t.withNano(0).toString()) }.apply() }
+
+    /** 퇴근 음성 안내 켜기/끄기 */
+    var voiceOn: Boolean
+        get() = prefs.getBoolean("voiceOn", false)
+        set(v) { prefs.edit().putBoolean("voiceOn", v).apply() }
 
     // ───────── 급여 이력 ─────────
     fun savePayslip(p: Payslip) = savePay(p.ym, p.companyId, p.companyName, p.gross, p.totalDeduct, p.net, "확정", p.lines())

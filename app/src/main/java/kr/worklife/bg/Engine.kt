@@ -17,7 +17,7 @@ object Engine {
         val locs = repo.locsOf(d)
         if (locs.isEmpty()) return Result(null, null, c)
         val g = GeofenceTracker(c, repo.settings, d, holiday = !HolidayCalendar(c).isWorkday(d))
-        g.feedAll(locs)
+        g.feedAll(locs, repo.resumeAt(d))
         return Result(null, g, c)
     }
 
@@ -34,8 +34,10 @@ object Engine {
     fun checkToday(ctx: Context, now: LocalDateTime = LocalDateTime.now()): DayRecord? {
         val d = now.toLocalDate()
         val repo = Repo.get(ctx)
-        val (_, g, c) = evaluate(ctx, d)
-        if (g == null || c == null) return null
+        val (_, g0, c) = evaluate(ctx, d)
+        if (c == null) return null
+        // [퇴근 취소] 뒤 아직 위치가 안 들어왔어도 '근무 중' 유지
+        val g = g0 ?: return null
         // 휴일엔 자동 기록하지 않음 (회사 반경 안이어도) → 홈에서 '휴일근무로 기록' 제안만
         if (!HolidayCalendar(c).isWorkday(d)) return null
         val existing = repo.day(d, c.id)
@@ -66,6 +68,22 @@ object Engine {
                 "${fi.toLocalTime().hhmm()} ~ ${co.toLocalTime().hhmm()} · 근무하셨다면 앱에서 [휴일근무로 기록]을 눌러주세요.")
         }
         return g
+    }
+
+    /**
+     * 홈 [퇴근 취소 · 아직 근무 중]: 오늘 퇴근 기록을 지우고 지금부터 다시 감지
+     * (지금 회사에 있는 것으로 보고, 다시 반경을 벗어나면 그때 퇴근으로 기록)
+     */
+    fun resumeWork(ctx: Context, now: LocalDateTime = LocalDateTime.now()) {
+        val repo = Repo.get(ctx)
+        val d = now.toLocalDate()
+        val c = repo.companyOn(d) ?: return
+        repo.setResume(d, now)
+        repo.deleteDay(d, c.id)
+        ctx.getSharedPreferences("worklife", Context.MODE_PRIVATE).edit().remove("checkoutNotified-$d").apply()
+        runCatching { Scheduler.ensure(ctx) }
+        runCatching { Geo.register(ctx) }
+        runCatching { Widgets.updateAll(ctx) }
     }
 
     const val FIELD_NOTE = "외근"
