@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.time.LocalDate
@@ -67,7 +68,7 @@ fun BigHeader(title: String, sub: String? = null) {
 }
 
 @Composable
-fun SCard(modifier: Modifier = Modifier, onClick: (() -> Unit)? = null, color: Color? = null,
+fun SCard(modifier: Modifier = Modifier, onClick: (() -> Unit)? = null, color: Color? = null, pad: Dp = 20.dp,
           content: @Composable ColumnScope.() -> Unit) {
     val m = modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp)
     // 색이 바뀔 때 0.6초 동안 부드럽게 전환
@@ -78,7 +79,7 @@ fun SCard(modifier: Modifier = Modifier, onClick: (() -> Unit)? = null, color: C
         shape = RoundedCornerShape(26.dp),
         colors = CardDefaults.cardColors(containerColor = bg),
         elevation = CardDefaults.cardElevation(0.dp),
-    ) { Column(Modifier.padding(20.dp), content = content) }
+    ) { Column(Modifier.padding(pad), content = content) }
 }
 
 @Composable

@@ -273,7 +273,8 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
     /** 새 내역 저장. 이미 있는 결제(문자+알림톡 중복 등)면 저장 안 하고 false */
     @Synchronized
     fun addCardTx(t: CardTx): Boolean {
-        val near = cardTxs("ts >= ? AND ts <= ?", arrayOf(t.ts.minusMinutes(4).toString(), t.ts.plusMinutes(4).toString()))
+        val day = t.ts.toLocalDate()
+        val near = cardTxs("ts >= ? AND ts < ?", arrayOf(day.minusDays(if (t.ts.hour == 0) 1 else 0).atStartOfDay().toString(), day.plusDays(1).atStartOfDay().plusMinutes(5).toString()))
         if (near.any { sameCardTx(it, t) || (it.raw.isNotEmpty() && it.raw == t.raw && it.ts == t.ts.withSecond(0).withNano(0)) }) return false
         writableDatabase.insert("cards", null, txValues(t))
         return true
@@ -327,11 +328,6 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
     var cardKeywords: List<String>
         get() = (prefs.getString("cardKeywords", null) ?: CardParser.DEFAULT_KEYWORDS.joinToString(",")).split(",").map { it.trim() }.filter { it.isNotEmpty() }
         set(v) { prefs.edit().putString("cardKeywords", v.joinToString(",")).apply() }
-
-    /** 문자함에서 마지막으로 읽은 문자 시각(ms) — 다음엔 그 뒤만 읽음 */
-    var cardSmsScannedUntil: Long
-        get() = prefs.getLong("cardSmsScan", 0L)
-        set(v) { prefs.edit().putLong("cardSmsScan", v).apply() }
 
     /** 큰 위젯 아랫줄: card / net / holiday / week / none */
     var widgetExtra: String

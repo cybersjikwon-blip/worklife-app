@@ -49,6 +49,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         Notif.init(this)
         tab.intValue = 0
+        handleShare(intent)
         setContent {
             WorkTheme {
                 if (!ready.value) SplashScreen()
@@ -71,7 +72,6 @@ class MainActivity : ComponentActivity() {
         Engine.checkToday(this)
         Scheduler.scheduleAll(this)
         Geo.register(this)
-        runCatching { CardIngest.catchUp(this) } // 놓친 카드 문자 이어서 읽기
     }
 
     private fun afterReady() {
@@ -91,6 +91,16 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         tab.intValue = 0 // 아이콘·알림으로 다시 열면 홈
+        handleShare(intent)
+    }
+
+    /** 문자앱 [공유] → 카드 탭으로 */
+    private fun handleShare(i: Intent?) {
+        if (i?.action != Intent.ACTION_SEND) return
+        val t = i.getStringExtra(Intent.EXTRA_TEXT) ?: return
+        CardShare.put(t)
+        tab.intValue = 3
+        version.intValue++
     }
 
     override fun onStop() {
@@ -163,13 +173,22 @@ fun AppRoot(version: Int, tab: Int, setTab: (Int) -> Unit, bump: () -> Unit) {
     }
     UpdateDialogHost(bump)
 
-    // 뒤로가기 (메시지 없음): 홈에서는 2번 → 종료 / 다른 메뉴에서는 1번 → 홈, 한 번 더 → 종료
+    // 뒤로가기: 다른 메뉴에서는 1번 → 홈, 홈에서는 안내 후 2초 안에 한 번 더 → 종료
     val act = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
+    // 홈에서 뒤로 1번 → 안내 표시, 2초 안에 한 번 더 → 종료 (스마트스토어 앱처럼)
+    var armedAt by remember { mutableLongStateOf(0L) }
+    var toast by remember { mutableStateOf<android.widget.Toast?>(null) }
     BackHandler(enabled = true) {
+        val nowMs = System.currentTimeMillis()
         when {
-            tab != 0 -> { setTab(0); armed = true }
-            armed -> act?.finish()
-            else -> armed = true
+            armed && nowMs - armedAt <= 2000 && tab == 0 -> { toast?.cancel(); act?.finish() }
+            else -> {
+                if (tab != 0) setTab(0) // 다른 메뉴 → 홈으로 가면서 안내 (2초 안에 한 번 더 누르면 종료)
+                armed = true; armedAt = nowMs
+                toast?.cancel()
+                toast = act?.let { android.widget.Toast.makeText(it, "'뒤로' 버튼을 한번 더 누르시면 종료됩니다.", android.widget.Toast.LENGTH_SHORT) }
+                toast?.show()
+            }
         }
     }
 }

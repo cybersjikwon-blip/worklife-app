@@ -1,6 +1,7 @@
 package kr.worklife.ui
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -135,54 +136,63 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
         val field = Engine.isFieldWork(data.rec)
         val working = hol == null && (title == "근무 중" || title.startsWith("연장 근무 중") || title == "퇴근 감지 중" ||
             (field && now.toLocalTime().isBefore(hm(c.workEnd)) && now.toLocalTime().isAfter(hm(c.workStart))))
-        SCard(color = if (working) WorkingGreen else null) {
+        SCard(color = if (working) WorkingGreen else null, pad = 16.dp) {
             var voiceOn by remember { mutableStateOf(Voice.isOn(ctx)) }
-            CardTitle("오늘", trailing = {
-                if (working) Tag(if (field) "외근" else "근무 중", OkGreen)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("오늘", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f))
+                        if (working) Box(Modifier.padding(start = 6.dp)) { Tag(if (field) "외근" else "근무 중", OkGreen) }
+                    }
+                    Text(title, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 2.dp))
+                    Text(sub, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f), maxLines = 2)
+                }
                 // 퇴근 음성 안내 켜기/끄기 (켜면 퇴근 순간 "퇴근합니다~!")
                 if (hol == null) Surface(onClick = { voiceOn = !voiceOn; Voice.set(ctx, voiceOn) },
                     shape = androidx.compose.foundation.shape.CircleShape,
                     color = if (voiceOn) OkGreen.copy(alpha = .18f) else MaterialTheme.colorScheme.onSurface.copy(alpha = .06f),
-                    modifier = Modifier.padding(start = 8.dp).size(36.dp)) {
+                    modifier = Modifier.size(38.dp)) {
                     Box(contentAlignment = Alignment.Center) { Text(if (voiceOn) "🔊" else "🔇", fontSize = 17.sp) }
                 }
-            })
-            Text(title, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Text(sub, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f), modifier = Modifier.padding(top = 4.dp))
+            }
             // 점심 외출 표시
             data.tracker?.outings?.filter { it.lunch }?.forEach { o ->
                 Text("점심 외출 ${o.from.toLocalTime().hhmm()}~${o.to.toLocalTime().hhmm()}" + (if (o.overMin > 0) " (${o.overMin}분 초과)" else ""),
-                    fontSize = 13.sp, color = if (o.overMin > 0) OtOrange else MaterialTheme.colorScheme.onSurface.copy(alpha = .6f),
-                    modifier = Modifier.padding(top = 4.dp))
+                    fontSize = 12.sp, color = if (o.overMin > 0) OtOrange else MaterialTheme.colorScheme.onSurface.copy(alpha = .6f),
+                    modifier = Modifier.padding(top = 2.dp))
             }
             data.tracker?.outsideSince?.let { os ->
                 if (hol == null && data.rec == null && c.inLunch(os.toLocalTime()))
-                    Text("점심 외출 중 (${os.toLocalTime().hhmm()}~)", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 4.dp))
+                    Text("점심 외출 중 (${os.toLocalTime().hhmm()}~)", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 2.dp))
             }
             if (hol == null && data.rec?.status != Status.ABSENT && data.rec?.status != Status.LEAVE && data.rec?.status != Status.HALF_LEAVE) {
-                Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilledTonalButton(onClick = {
+                val small = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                val bm = Modifier.height(34.dp)
+                val done = data.rec?.checkOut != null
+                Row(Modifier.padding(top = 10.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    if (!done) FilledTonalButton(onClick = {
                         repo.saveDay(DayRecord(today, c.id, Status.WORK, hm(c.workStart), LocalTime.now().withSecond(0).withNano(0), Source.MANUAL, "수동 퇴근"))
                         Scheduler.cancelPoll(ctx)
                         Voice.checkout(ctx)
                         bump()
-                    }, enabled = data.rec?.checkOut == null && now.toLocalTime().isAfter(hm(c.workStart))) { Text("지금 퇴근") }
+                    }, enabled = now.toLocalTime().isAfter(hm(c.workStart)), modifier = bm, contentPadding = small) { Text("지금 퇴근", fontSize = 13.sp) }
                     OutlinedButton(onClick = {
                         pickTime(ctx, data.rec?.checkOut ?: hm(c.workEnd)) { t ->
                             repo.saveDay(DayRecord(today, c.id, Status.WORK, hm(c.workStart), t, Source.MANUAL, "수동 입력")); bump()
                         }
-                    }) { Text("퇴근시각 입력") }
-                }
-                // 퇴근이 잘못 잡혔을 때: 지우고 지금부터 다시 감지
-                if (data.rec?.checkOut != null && data.rec.status == Status.WORK && !field)
-                    TextButton(onClick = { Engine.resumeWork(ctx); Tracker.oneShot(ctx) { bump() }; bump() }, contentPadding = PaddingValues(0.dp)) {
-                        Text("퇴근 취소 · 아직 근무 중이에요", fontSize = 13.sp)
+                    }, modifier = bm, contentPadding = small) { Text(if (done) "시각 수정" else "퇴근시각", fontSize = 13.sp) }
+                    // 퇴근이 잘못 잡혔을 때: 지우고 지금부터 다시 감지
+                    if (done && data.rec?.status == Status.WORK && !field)
+                        TextButton(onClick = { Engine.resumeWork(ctx); Tracker.oneShot(ctx) { bump() }; bump() }, modifier = bm, contentPadding = small) {
+                            Text("퇴근 취소", fontSize = 13.sp)
+                        }
+                    // 외근: 그날은 위치로 판정하지 않음
+                    if (field) TextButton(onClick = { Engine.setFieldWork(ctx, false); bump() }, modifier = bm, contentPadding = small) {
+                        Text("외근 취소", fontSize = 13.sp)
+                    } else if (data.rec == null) TextButton(onClick = { Engine.setFieldWork(ctx, true); bump() }, modifier = bm, contentPadding = small) {
+                        Text("오늘 외근", fontSize = 13.sp)
                     }
-                // 외근: 그날은 위치로 판정하지 않음
-                if (field) TextButton(onClick = { Engine.setFieldWork(ctx, false); bump() }, contentPadding = PaddingValues(0.dp)) {
-                    Text("외근 취소 (위치로 다시 판정)", fontSize = 13.sp)
-                } else if (data.rec == null) TextButton(onClick = { Engine.setFieldWork(ctx, true); bump() }, contentPadding = PaddingValues(0.dp)) {
-                    Text("오늘 외근 (위치 판정 안 함)", fontSize = 13.sp)
                 }
             }
         }
@@ -301,7 +311,15 @@ private fun todayStatus(c: Company, d: HomeData, hol: String?, now: LocalDateTim
         r?.checkOut != null -> {
             val rr = r!!
             val ot = overtimeMin(c, rr)
-            "퇴근 ${rr.checkOut!!.hhmm()}" to ("[${rr.source.label}] " + if (ot > 0) "연장 ${hmShort(ot)}" else "정시 퇴근") + (if (rr.note.isNotBlank()) " · ${rr.note}" else "")
+            val over = rr.checkOut!!.minOfDay() - hm(c.workEnd).minOfDay()
+            // 기준이 되는 정시를 같이 보여줘서 설정이 틀렸는지 바로 보이게
+            val what = when {
+                ot > 0 -> "연장 ${hmShort(ot)} (정시 ${c.workEnd})"
+                over > 0 -> "정시 ${c.workEnd} + ${over}분 · 연장 단위 ${c.overtimeUnitMin}분 미만"
+                over < 0 -> "정시 ${c.workEnd}보다 ${hmShort(-over)} 일찍"
+                else -> "정시(${c.workEnd}) 퇴근"
+            }
+            "퇴근 ${rr.checkOut.hhmm()}" to ("[${rr.source.label}] $what") + (if (rr.note.isNotBlank()) " · ${rr.note}" else "")
         }
         hol != null -> "쉬는 날" to "$hol · 근무 체크 안 함"
         t.isBefore(start) -> "출근 전" to "${c.workStart} 출근"

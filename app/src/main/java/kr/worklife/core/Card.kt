@@ -178,6 +178,11 @@ fun summarizeCards(txs: List<CardTx>, people: List<CardPerson>, from: LocalDate,
 }
 
 /** 같은 결제인지 (문자 + 알림톡 중복): 같은 카드·금액·부호, 3분 이내, 출처가 다르거나 원문이 같음 */
-fun sameCardTx(a: CardTx, b: CardTx): Boolean =
-    a.amount == b.amount && cardEq(a.card, b.card) && kotlin.math.abs(ChronoUnit.MINUTES.between(a.ts, b.ts)) <= 3 &&
+fun sameCardTx(a: CardTx, b: CardTx): Boolean {
+    if (a.amount != b.amount) return false
+    // 카드사 파일은 시간이 없거나 다를 수 있음 → 같은 날·같은 금액·(끝자리 없거나 같음)이면 같은 결제
+    if ((a.source == "file") != (b.source == "file"))
+        return a.ts.toLocalDate() == b.ts.toLocalDate() && (a.card.isEmpty() || b.card.isEmpty() || cardEq(a.card, b.card))
+    return cardEq(a.card, b.card) && kotlin.math.abs(ChronoUnit.MINUTES.between(a.ts, b.ts)) <= 3 &&
         (a.source != b.source || a.raw == b.raw)
+}

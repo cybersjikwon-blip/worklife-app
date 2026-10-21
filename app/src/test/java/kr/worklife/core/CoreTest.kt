@@ -466,4 +466,40 @@ class CoreTest {
         val (s2, e2) = cardRange(CardPeriod("custom", customStart = LocalDate.of(2026, 8, 3)), LocalDate.of(2026, 10, 21))
         assertEquals(LocalDate.of(2026, 8, 3), s2); assertEquals(LocalDate.of(2026, 10, 21), e2)
     }
+
+    // ── 13: 문자 권한 없이 가져오기
+    @Test fun pasteManyMessages() {
+        val txt = "[Web발신]\nBC카드(1234)승인\n홍*동\n12,300원 일시불\n10/21 14:23\n스타벅스\n[Web발신]\nBC카드(1234)취소\n홍*동\n12,300원\n10/21 15:00\n스타벅스\n\n안녕하세요 오늘 회의 3시\n\n비씨(5678)김*수님 10/20 12:05 8,000원 일시불 김밥천국"
+        val l = CardImport.parseText(txt, R0, CardParser.DEFAULT_KEYWORDS)
+        assertEquals(3, l.size); assertEquals(8000L, l.sumOf { it.amount })
+    }
+    @Test fun csvImport() {
+        val csv = "BC카드 이용내역\n이용일자,이용시간,카드번호,가맹점명,이용금액,할부,구분\n2026.10.01,12:30,9410-****-****-1234,\"맛집, 강남\",\"15,000\",일시불,승인\n2026.10.02,09:00,9410-****-****-1234,편의점,3000,,취소\n합계,,,,18000,,"
+        val l = CardImport.fromRows(CardImport.csvRows(csv))
+        assertEquals(2, l.size); assertEquals("1234", l[0].card); assertEquals("맛집, 강남", l[0].merchant)
+        assertEquals(LocalDateTime.of(2026, 10, 1, 12, 30), l[0].ts); assertEquals(-3000L, l[1].amount)
+    }
+    @Test fun xlsxImport() {
+        val bos = java.io.ByteArrayOutputStream()
+        java.util.zip.ZipOutputStream(bos).use { z ->
+            z.putNextEntry(java.util.zip.ZipEntry("xl/sharedStrings.xml"))
+            z.write("<sst><si><t>승인일시</t></si><si><t>가맹점</t></si><si><t>승인금액</t></si><si><t>GS25 &amp; 카페</t></si></sst>".toByteArray()); z.closeEntry()
+            z.putNextEntry(java.util.zip.ZipEntry("xl/worksheets/sheet1.xml"))
+            z.write(("<worksheet><sheetData><row r=\"1\"><c r=\"A1\" t=\"s\"><v>0</v></c><c r=\"B1\" t=\"s\"><v>1</v></c><c r=\"C1\" t=\"s\"><v>2</v></c></row>" +
+                "<row r=\"2\"><c r=\"A2\"><v>46316.5</v></c><c r=\"B2\" t=\"s\"><v>3</v></c><c r=\"C2\"><v>4500</v></c></row></sheetData></worksheet>").toByteArray()); z.closeEntry()
+        }
+        val l = CardImport.fromRows(CardImport.rowsFromFile(bos.toByteArray()))
+        assertEquals(1, l.size); assertEquals("GS25 & 카페", l[0].merchant); assertEquals(4500L, l[0].amount)
+        assertEquals(LocalDateTime.of(2026, 10, 21, 12, 0), l[0].ts)
+    }
+    @Test fun htmlXlsImport() {
+        val h = "<table><tr><td>이용일</td><td>이용하신곳</td><td>이용금액</td></tr><tr><td>2026-10-03</td><td>주유소</td><td>50,000</td></tr></table>"
+        val l = CardImport.fromRows(CardImport.rowsFromFile(h.toByteArray()))
+        assertEquals(1, l.size); assertEquals(50000L, l[0].amount)
+    }
+    @Test fun fileDedupesWithNoti() {
+        val n = CardTx(ts = R0.withHour(14), amount = 12300, card = "1234", source = "sms", raw = "a")
+        assertTrue(sameCardTx(n, n.copy(ts = R0.withHour(12), card = "", source = "file", raw = "b")))
+        assertTrue(!sameCardTx(n, n.copy(ts = R0.withHour(12).minusDays(1), card = "", source = "file", raw = "b")))
+    }
 }

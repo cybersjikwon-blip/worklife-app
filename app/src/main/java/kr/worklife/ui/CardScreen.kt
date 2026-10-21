@@ -1,6 +1,5 @@
 package kr.worklife.ui
 
-import android.Manifest
 import android.content.Intent
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -54,45 +53,39 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
     var msg by remember { mutableStateOf<String?>(null) }
     var showN by remember { mutableIntStateOf(50) }
 
-    fun scan(start: LocalDate) {
+    var pasting by remember { mutableStateOf(false) }
+    fun runImport(label: String, job: () -> Pair<Int, Int>) {
         if (busy) return
-        busy = true; msg = "문자함 읽는 중…"
+        busy = true; msg = "$label 읽는 중…"
         Thread {
-            val (read, added) = runCatching { CardIngest.scanInbox(ctx, start) }.getOrDefault(0 to 0)
+            val r = runCatching { job() }
             android.os.Handler(android.os.Looper.getMainLooper()).post {
                 busy = false
-                msg = "${start.monthValue}/${start.dayOfMonth}부터 문자 ${read}건 확인 · 새 결제 ${added}건 추가"
+                msg = r.fold({ (found, added) ->
+                    if (found == 0) "$label: 카드 승인 내역을 찾지 못했어요" else "$label: 결제 ${found}건 찾음 · 새로 ${added}건 추가" + (if (found > added) " (${found - added}건은 이미 있음)" else "")
+                }, { "$label 읽기 실패: ${it.message ?: "알 수 없는 오류"}" })
                 refresh()
             }
         }.start()
     }
-
-    val smsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        if (CardIngest.hasSms(ctx)) scan(from) else { msg = "문자 권한이 거부됐어요. 설정 > 애플리케이션 > 권한에서 '문자'를 허용해 주세요."; tick++ }
+    val fileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) runImport("파일") { CardIngest.importFile(ctx, uri) }
     }
-    // 탭을 열 때: 놓친 문자 이어서 읽기
-    LaunchedEffect(Unit) {
-        if (CardIngest.hasSms(ctx)) Thread {
-            runCatching { CardIngest.catchUp(ctx) }
-            android.os.Handler(android.os.Looper.getMainLooper()).post { tick++ }
-        }.start()
+    // 문자앱 [공유]로 들어온 글
+    LaunchedEffect(version) {
+        CardShare.take()?.let { t -> runImport("공유한 문자") { CardIngest.importText(ctx, t) } }
     }
 
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         BigHeader("카드 사용액", cardRangeLabel(period, today))
 
-        // ── 권한
-        if (!CardIngest.hasSms(ctx)) SCard(color = MaterialTheme.colorScheme.primaryContainer) {
-            Text("문자 읽기 권한이 필요해요", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
-            Text("BC카드 승인 문자를 읽어서 자동으로 합산해요. 카드 문자만 골라 저장하고, 문자 내용은 폰 밖으로 나가지 않아요.", fontSize = 14.sp)
-            Button(onClick = { smsLauncher.launch(arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS)) },
-                Modifier.padding(top = 10.dp)) { Text("문자 권한 허용") }
-        }
-        if (!CardIngest.hasNotiAccess(ctx)) SCard {
-            Text("알림톡으로 오는 승인도 합산하려면 (선택)", fontWeight = FontWeight.SemiBold)
-            Text("BC카드 승인을 카카오톡 알림톡이나 페이북 앱 알림으로 받는다면 '알림 접근'을 켜 주세요. 문자와 겹치는 건 1건으로 셉니다.", fontSize = 14.sp)
-            OutlinedButton(onClick = { runCatching { ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } },
-                Modifier.padding(top = 10.dp)) { Text("알림 접근 설정 열기") }
+        // ── 자동 합산: 알림 접근 (문자 권한 없이)
+        if (!CardIngest.hasNotiAccess(ctx)) SCard(color = MaterialTheme.colorScheme.primaryContainer) {
+            Text("자동으로 합산하려면 '알림 접근'을 켜 주세요", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+            Text("BC카드 승인 문자·카카오 알림톡·페이북 알림이 올 때 카드 승인만 골라 합산해요. 다른 알림 내용은 저장하지 않고, 폰 밖으로 나가지 않아요.\n" +
+                "열린 화면에서 '슬기로운 직장생활'을 찾아 켜면 돼요.", fontSize = 14.sp)
+            Button(onClick = { runCatching { ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } },
+                Modifier.padding(top = 10.dp)) { Text("알림 접근 켜기") }
         }
 
         // ── 기간: 언제부터 합산할지
@@ -175,7 +168,7 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
                     else -> cardIncluded(t, people, bcOnly) && matchPerson(t, people) == filter
                 }
             }
-            if (shown.isEmpty()) Text(if (CardIngest.hasSms(ctx)) "이 기간 승인 내역이 없어요." else "문자 권한을 허용하면 내역이 채워져요.", fontSize = 14.sp)
+            if (shown.isEmpty()) Text(if (CardIngest.hasNotiAccess(ctx)) "이 기간 승인 내역이 없어요." else "알림 접근을 켜거나 아래에서 지난 내역을 불러오면 채워져요.", fontSize = 14.sp)
             shown.take(showN).forEach { t ->
                 val inc = cardIncluded(t, people, bcOnly)
                 val who = matchPerson(t, people).let { if (it >= 0) people[it].name else if (inc) "미지정" else "합산 제외" }
@@ -199,14 +192,21 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
         // ── 불러오기·설정
         SCard {
             CardTitle("불러오기 · 설정")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilledTonalButton(onClick = {
-                    if (CardIngest.hasSms(ctx)) scan(from) else smsLauncher.launch(arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS))
-                }, enabled = !busy) { Text(if (busy) "읽는 중…" else "문자함에서 불러오기") }
+            Text("지난 내역 채우기 (알림 접근을 켜기 전 결제)", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f))
+            Row(Modifier.padding(top = 6.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton(onClick = { pasting = true }, enabled = !busy) { Text("문자 붙여넣기") }
+                OutlinedButton(onClick = {
+                    runCatching { fileLauncher.launch(arrayOf("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        "application/vnd.ms-excel", "text/csv", "text/comma-separated-values", "text/plain", "text/html", "*/*")) }
+                }, enabled = !busy) { Text("이용내역 파일") }
                 OutlinedButton(onClick = { adding = true }) { Text("직접 추가") }
             }
+            Text("· 문자앱에서 승인 문자를 길게 눌러 [공유] → '카드 사용액에 추가'를 골라도 돼요 (여러 개 선택 가능)\n" +
+                "· BC카드 홈페이지/페이북의 이용내역을 엑셀(xlsx·xls)·CSV로 받아 [이용내역 파일]로 불러오면 한 번에 채워져요\n" +
+                "· 이미 있는 결제는 다시 넣어도 1건으로 셉니다",
+                fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f), modifier = Modifier.padding(top = 6.dp))
             msg?.let { Text(it, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 6.dp)) }
-            SwitchRow("BC카드 문자만 합산", bcOnly) { repo.cardBcOnly = it; refresh() }
+            SwitchRow("BC카드만 합산", bcOnly) { repo.cardBcOnly = it; refresh() }
             var kw by remember(version) { mutableStateOf(repo.cardKeywords.joinToString(", ")) }
             Field("BC 구분 단어 (쉼표로)", kw, { kw = it; repo.cardKeywords = it.split(",").map { s -> s.trim() }.filter { s -> s.isNotEmpty() }; tick++ },
                 hint = "문자에 이 단어가 있으면 BC카드로 봐요. 등록한 카드 끝자리·번호는 항상 합산")
@@ -227,6 +227,7 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
             editTx = null; refresh()
         },
         onDelete = { repo.deleteCardTx(t.id); editTx = null; refresh() }) }
+    if (pasting) PasteDialog(onDismiss = { pasting = false }) { t -> pasting = false; runImport("붙여넣은 문자") { CardIngest.importText(ctx, t) } }
     if (adding) AddTxDialog(people, onDismiss = { adding = false }) { repo.addCardTx(it); adding = false; refresh() }
     assignCard?.let { card -> AssignCardDialog(card, people, onDismiss = { assignCard = null }) { i, newName ->
         val list = if (i < 0) people + CardPerson(newName.ifBlank { "카드 ${people.size + 1}" }, cards = listOf(card))
@@ -379,4 +380,28 @@ private fun AssignCardDialog(card: String, people: List<CardPerson>, onDismiss: 
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("닫기") } })
+}
+
+/** 공유로 들어온 글을 카드 탭에 넘기는 통로 */
+object CardShare {
+    @Volatile private var pending: String? = null
+    fun put(t: String) { pending = t }
+    fun take(): String? = pending.also { pending = null }
+}
+
+/** 승인 문자 여러 개를 한꺼번에 붙여넣기 */
+@Composable
+private fun PasteDialog(onDismiss: () -> Unit, onOk: (String) -> Unit) {
+    var t by remember { mutableStateOf("") }
+    val clip = androidx.compose.ui.platform.LocalClipboardManager.current
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("승인 문자 붙여넣기") },
+        text = {
+            Column {
+                Text("문자앱에서 승인 문자를 복사해 붙여넣으세요. 여러 개를 한꺼번에 넣어도 하나씩 나눠서 읽어요.", fontSize = 13.sp)
+                TextButton(onClick = { clip.getText()?.text?.let { t = if (t.isBlank()) it else t + "\n\n" + it } }, contentPadding = PaddingValues(0.dp)) { Text("클립보드에서 붙여넣기") }
+                OutlinedTextField(t, { t = it }, Modifier.fillMaxWidth().heightIn(min = 140.dp, max = 280.dp), placeholder = { Text("[Web발신]\nBC카드(1234)승인\n…") })
+            }
+        },
+        confirmButton = { TextButton(onClick = { onOk(t) }, enabled = t.isNotBlank()) { Text("가져오기") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } })
 }
