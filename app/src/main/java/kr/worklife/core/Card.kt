@@ -66,6 +66,8 @@ fun cardRangeLabel(p: CardPeriod, today: LocalDate): String {
 
 object CardParser {
     val DEFAULT_KEYWORDS = listOf("BC", "비씨", "페이북", "바로카드")
+    /** BC카드 승인 문자 발신번호 */
+    val BC_NUMBERS = setOf("15884000", "15884515", "15664000", "18994000")
 
     private val amountRx = Regex("""(?<![\d.])(\d{1,3}(?:,\d{3})+|\d{1,9})\s*원""")
     private val foreignRx = Regex("""(USD|JPY|EUR|CNY|GBP|\$|달러|엔|유로)\s*([\d,]+(?:\.\d+)?)|([\d,]+(?:\.\d+)?)\s*(USD|JPY|EUR|CNY|GBP|달러|엔|유로)""")
@@ -87,7 +89,7 @@ object CardParser {
         // 카드 문자인지: 카드 표시나 카드사 이름이 있어야 함 (은행 입출금 문자 제외)
         val cardM = cardRx.find(text)
         val card = cardM?.groupValues?.drop(1)?.firstOrNull { it.isNotEmpty() } ?: ""
-        val isBc = keywords.any { k -> k.isNotBlank() && text.contains(k, ignoreCase = true) }
+        val isBc = keywords.any { k -> k.isNotBlank() && text.contains(k, ignoreCase = true) } || normPhone(sender) in BC_NUMBERS
         if (card.isEmpty() && !text.contains("카드") && !isBc) return null
 
         // 금액: '누적/잔여/한도' 바로 뒤 금액은 제외하고 첫 번째

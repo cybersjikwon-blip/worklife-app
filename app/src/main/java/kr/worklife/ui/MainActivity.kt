@@ -72,6 +72,7 @@ class MainActivity : ComponentActivity() {
         Engine.checkToday(this)
         Scheduler.scheduleAll(this)
         Geo.register(this)
+        CardIngest.rebind(this) // 카드 알림 연결 다시 요청
     }
 
     private fun afterReady() {

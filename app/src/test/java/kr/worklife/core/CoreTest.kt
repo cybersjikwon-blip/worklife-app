@@ -513,4 +513,13 @@ class CoreTest {
         // 같은 결제가 이미 알림으로 들어와 있으면 중복 아님 처리
         assertTrue(sameCardTx(l[0], l[0].copy(source = "sms", raw = "x")))
     }
+    @Test fun rcsNotificationShort() {
+        // 카드형 메시지 알림: 제목(비씨카드) + 짧은 본문
+        val a = CardParser.parse("", "비씨카드\nIBK기업BC(9955) 54,900원 사용", R0)!!
+        assertEquals(54900L, a.amount); assertTrue(a.isBc)
+        val b = CardParser.parse("", "비씨카드\n3,600원 사용", R0)!!
+        assertEquals(3600L, b.amount); assertTrue(b.isBc)
+        val c = CardParser.parse("15884000", "1588-4000\n12,000원 사용 일시불", R0)!!
+        assertTrue(c.isBc)
+    }
 }

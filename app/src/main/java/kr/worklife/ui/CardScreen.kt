@@ -84,12 +84,41 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
         BigHeader("카드 사용액", cardRangeLabel(period, today))
 
         // ── 자동 합산: 알림 접근 (문자 권한 없이)
+        val openAppInfo = { runCatching { ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.parse("package:" + ctx.packageName))) } }
         if (!CardIngest.hasNotiAccess(ctx)) SCard(color = MaterialTheme.colorScheme.primaryContainer) {
             Text("자동으로 합산하려면 '알림 접근'을 켜 주세요", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
-            Text("BC카드 승인 문자·카카오 알림톡·페이북 알림이 올 때 카드 승인만 골라 합산해요. 다른 알림 내용은 저장하지 않고, 폰 밖으로 나가지 않아요.\n" +
-                "열린 화면에서 '슬기로운 직장생활'을 찾아 켜면 돼요.", fontSize = 14.sp)
-            Button(onClick = { runCatching { ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } },
-                Modifier.padding(top = 10.dp)) { Text("알림 접근 켜기") }
+            Text("BC카드 승인 문자·카드형 메시지·카카오 알림톡·페이북 알림이 올 때 카드 승인만 골라 합산해요. 다른 알림은 저장하지 않고, 폰 밖으로 나가지 않아요.\n" +
+                "열린 화면에서 '슬기로운 직장생활'을 켜세요.", fontSize = 14.sp)
+            Text("※ 회색으로 막혀 안 켜지면: [앱 정보] → 오른쪽 위 ⋮ → '제한된 설정 허용' 후 다시 켜기 (직접 설치한 앱이라 한 번 필요)",
+                fontSize = 12.sp, color = OtOrange, modifier = Modifier.padding(top = 6.dp))
+            Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { runCatching { ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } }) { Text("알림 접근 켜기") }
+                OutlinedButton(onClick = { openAppInfo() }) { Text("앱 정보") }
+            }
+        } else {
+            // 연결 상태 + 최근 받은 카드 알림 기록 (합산이 안 될 때 원인 확인용)
+            var open by remember { mutableStateOf(false) }
+            val conn = CardIngest.connectedAt(ctx)
+            val log = remember(tick, version) { CardIngest.notiLog(ctx) }
+            SCard(pad = 16.dp, onClick = { open = !open }) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (conn > 0) "● 자동 합산 켜짐" else "● 알림 접근은 켜졌지만 아직 연결 전", fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                        color = if (conn > 0) OkGreen else OtOrange, modifier = Modifier.weight(1f))
+                    Text(if (open) "접기" else "알림 기록 ${log.size}", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                }
+                if (conn > 0) Text("마지막 연결 " + java.time.Instant.ofEpochMilli(conn).atZone(java.time.ZoneId.systemDefault()).toLocalDateTime().let { "${it.monthValue}/${it.dayOfMonth} ${it.toLocalTime().hhmm()}" },
+                    fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+                if (open) {
+                    if (log.isEmpty()) Text("아직 받은 카드 알림이 없어요. 승인 문자가 왔는데도 여기 안 보이면 [다시 연결]을 누르거나 알림 접근을 껐다 켜 주세요.", fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                    log.forEach { Text(it, fontSize = 11.sp, maxLines = 2, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .7f), modifier = Modifier.padding(top = 4.dp)) }
+                    Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { CardIngest.rebind(ctx); msg = "알림 연결을 다시 요청했어요"; tick++ }) { Text("다시 연결") }
+                        OutlinedButton(onClick = { runCatching { ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } }) { Text("알림 접근") }
+                    }
+                    Text("문자앱 알림을 꺼 두었거나 '알림에 내용 숨기기'가 켜져 있으면 읽을 수 없어요 (문자앱 알림은 켜 두세요).", fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f), modifier = Modifier.padding(top = 6.dp))
+                }
+            }
         }
 
         // ── 기간: 언제부터 합산할지
