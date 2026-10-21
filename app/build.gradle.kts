@@ -51,5 +51,7 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-core")
     implementation("com.google.android.gms:play-services-location:21.3.0")
+    // 카드 문자 화면 캡처 글자인식 (기기 안에서만 처리, 인터넷 불필요)
+    implementation("com.google.mlkit:text-recognition-korean:16.0.1")
     testImplementation("junit:junit:4.13.2")
 }

@@ -72,8 +72,12 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
         if (uri != null) runImport("파일") { CardIngest.importFile(ctx, uri) }
     }
     // 문자앱 [공유]로 들어온 글
+    val imageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(20)) { uris ->
+        if (uris.isNotEmpty()) runImport("캡처 ${uris.size}장") { kr.worklife.bg.CardOcr.importImages(ctx, uris) }
+    }
     LaunchedEffect(version) {
         CardShare.take()?.let { t -> runImport("공유한 문자") { CardIngest.importText(ctx, t) } }
+        CardShare.takeImages()?.let { l -> runImport("공유한 캡처 ${l.size}장") { kr.worklife.bg.CardOcr.importImages(ctx, l) } }
     }
 
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
@@ -194,14 +198,18 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
             CardTitle("불러오기 · 설정")
             Text("지난 내역 채우기 (알림 접근을 켜기 전 결제)", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f))
             Row(Modifier.padding(top = 6.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilledTonalButton(onClick = { pasting = true }, enabled = !busy) { Text("문자 붙여넣기") }
+                FilledTonalButton(onClick = {
+                    runCatching { imageLauncher.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+                }, enabled = !busy) { Text("캡처 불러오기") }
+                OutlinedButton(onClick = { pasting = true }, enabled = !busy) { Text("문자 붙여넣기") }
                 OutlinedButton(onClick = {
                     runCatching { fileLauncher.launch(arrayOf("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         "application/vnd.ms-excel", "text/csv", "text/comma-separated-values", "text/plain", "text/html", "*/*")) }
                 }, enabled = !busy) { Text("이용내역 파일") }
                 OutlinedButton(onClick = { adding = true }) { Text("직접 추가") }
             }
-            Text("· 문자앱에서 승인 문자를 길게 눌러 [공유] → '카드 사용액에 추가'를 골라도 돼요 (여러 개 선택 가능)\n" +
+            Text("· 카드 모양 승인 문자(RCS)처럼 공유가 안 되면: 문자 화면을 캡처 → [캡처 불러오기] (여러 장 가능, 한 장에 여러 건도 OK). 갤러리에서 캡처를 [공유] → '카드 사용액에 추가'도 돼요\n" +
+                "· 일반 문자는 길게 눌러 [공유] → '카드 사용액에 추가'\n" +
                 "· BC카드 홈페이지/페이북의 이용내역을 엑셀(xlsx·xls)·CSV로 받아 [이용내역 파일]로 불러오면 한 번에 채워져요\n" +
                 "· 이미 있는 결제는 다시 넣어도 1건으로 셉니다",
                 fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f), modifier = Modifier.padding(top = 6.dp))
@@ -385,8 +393,11 @@ private fun AssignCardDialog(card: String, people: List<CardPerson>, onDismiss: 
 /** 공유로 들어온 글을 카드 탭에 넘기는 통로 */
 object CardShare {
     @Volatile private var pending: String? = null
+    @Volatile private var images: List<android.net.Uri>? = null
     fun put(t: String) { pending = t }
     fun take(): String? = pending.also { pending = null }
+    fun putImages(l: List<android.net.Uri>) { images = l }
+    fun takeImages(): List<android.net.Uri>? = images.also { images = null }
 }
 
 /** 승인 문자 여러 개를 한꺼번에 붙여넣기 */

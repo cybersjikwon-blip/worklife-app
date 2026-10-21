@@ -73,7 +73,7 @@ object CardParser {
     private val dtRx = Regex("""(\d{1,2})[/.-](\d{1,2})\s*(\d{1,2}):(\d{2})""")
     private val nameRx = Regex("""([가-힣][*＊][가-힣]{1,2})|([가-힣]{2,4})\s*님""")
     private val instRx = Regex("""(\d{1,2})\s*개월""")
-    private val skipLine = Regex("""누적|잔여|잔액|한도|승인|취소|Web발신|국외발신|^\s*\[|원\s*$|^\s*\d{1,2}[/.-]\d{1,2}|일시불|개월|님$|카드\s*\(|^\s*[(\[]\d""")
+    private val skipLine = Regex("""누적|잔여|잔액|한도|승인|취소|Web\s*발신|국외발신|^\s*\[|원\s*$|^\s*\d{1,2}[/.-]\d{1,2}|일시불|개월|님$|카드\s*\(|^\s*[(\[]\d|[A-Za-z가-힣]\s*[(\[]\d[\d*]{2,3}[)\]]|한눈에|사용처\s*확인|확인된\s*발신|^\s*(오전|오후)\s|^\s*(법인|개인|체크|신용|가족)\s*$""")
     private val rejectRx = Regex("""거절|승인\s*불가|한도\s*초과|잔액\s*부족|비밀번호|오류|미승인|결제\s*예정|청구|명세서|안내드립니다|출금|입금|이체""")
     private val approveRx = Regex("""승인|결제|사용|일시불|개월""")
 

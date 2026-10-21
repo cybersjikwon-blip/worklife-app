@@ -95,10 +95,18 @@ class MainActivity : ComponentActivity() {
     }
 
     /** 문자앱 [공유] → 카드 탭으로 */
+    @Suppress("DEPRECATION")
     private fun handleShare(i: Intent?) {
-        if (i?.action != Intent.ACTION_SEND) return
-        val t = i.getStringExtra(Intent.EXTRA_TEXT) ?: return
-        CardShare.put(t)
+        if (i == null || (i.action != Intent.ACTION_SEND && i.action != Intent.ACTION_SEND_MULTIPLE)) return
+        val imgs = mutableListOf<android.net.Uri>()
+        if (i.type?.startsWith("image/") == true) {
+            runCatching { (i.getParcelableExtra<android.os.Parcelable>(Intent.EXTRA_STREAM) as? android.net.Uri)?.let { imgs += it } }
+            runCatching { i.getParcelableArrayListExtra<android.os.Parcelable>(Intent.EXTRA_STREAM)?.forEach { (it as? android.net.Uri)?.let { u -> imgs += u } } }
+            if (imgs.isEmpty()) runCatching { i.clipData?.let { c -> for (k in 0 until c.itemCount) c.getItemAt(k).uri?.let { imgs += it } } }
+        }
+        val t = i.getStringExtra(Intent.EXTRA_TEXT)
+        if (imgs.isEmpty() && t.isNullOrBlank()) return
+        if (imgs.isNotEmpty()) CardShare.putImages(imgs) else CardShare.put(t!!)
         tab.intValue = 3
         version.intValue++
     }

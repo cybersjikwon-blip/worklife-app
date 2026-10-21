@@ -16,14 +16,21 @@ object CardImport {
     /** 붙여넣은 글 → 문자 덩어리들 ([Web발신] / 빈 줄 / 'BC카드(' 시작 기준으로 나눔) */
     fun splitMessages(text: String): List<String> {
         val t = text.replace("\r", "")
-        val starts = Regex("""(?m)^(?=\[Web발신]|\[국외발신]|(?:BC|비씨|[가-힣A-Z]{1,6})\s*카드?\s*[(\[]\d[\d*]{2,3}[)\]])""")
+        val starts = Regex("""(?m)^(?=\[\s*Web\s*발신\s*]|\[국외발신]|(?:BC|비씨|[가-힣A-Za-z]{1,10})\s*(?:카드)?\s*[(\[]\d[\d*]{2,3}[)\]])""")
         val byStart = t.split(starts).map { it.trim() }.filter { it.isNotEmpty() }
         val parts = if (byStart.size > 1) byStart else t.split(Regex("""\n\s*\n""")).map { it.trim() }.filter { it.isNotEmpty() }
         return parts.flatMap { p -> if (p.contains("\n\n")) p.split(Regex("""\n\s*\n""")).map { it.trim() } else listOf(p) }.filter { it.isNotEmpty() }
     }
 
     fun parseText(text: String, now: LocalDateTime, keywords: List<String>, source: String = "share"): List<CardTx> =
-        splitMessages(text).mapNotNull { m -> CardParser.parse("", m, now, keywords, source) }
+        splitMessages(cleanOcr(text)).mapNotNull { m -> CardParser.parse("", m, now, keywords, source) }
+
+    /** 화면 캡처 글자인식 결과 다듬기: '54,900 원' / '10 / 21' 같은 띄어쓰기, 메신저 화면 문구 제거 */
+    fun cleanOcr(t: String): String = t.lines().map { l ->
+        l.replace(Regex("""(\d)\s*,\s*(\d{3})"""), "$1,$2").replace(Regex("""(\d)\s+원"""), "$1원")
+            .replace(Regex("""(\d{1,2})\s*/\s*(\d{1,2})\s+(\d{1,2})\s*:\s*(\d{2})"""), "$1/$2 $3:$4")
+    }.filter { l -> !Regex("""확인된\s*발신번호|한눈에\s*보기|사용처\s*확인|입력할\s*수\s*없는|^\s*(오전|오후)\s*\d{1,2}:\d{2}\s*$""").containsMatchIn(l) }
+        .joinToString("\n")
 
     // ───────── 표(엑셀/CSV) ─────────
     private val dateCol = Regex("이용\\s*일|승인\\s*일|거래\\s*일|사용\\s*일|일자|날짜|이용일시|승인일시")

@@ -502,4 +502,15 @@ class CoreTest {
         assertTrue(sameCardTx(n, n.copy(ts = R0.withHour(12), card = "", source = "file", raw = "b")))
         assertTrue(!sameCardTx(n, n.copy(ts = R0.withHour(12).minusDays(1), card = "", source = "file", raw = "b")))
     }
+    @Test fun rcsCardScreenshot() {
+        // 비씨카드 RCS 카드형 메시지 화면 캡처를 글자인식한 결과 (띄어쓰기·버튼 문구 섞임)
+        val ocr = "비씨카드\n1588-4000\n[Web발신] 확인된 발신번호\n승인\nIBK기업BC(9955)\n54,900 원 사용\n법인\n일시불\n10/21 10:46\n네이버파이낸셜(주)\n오늘 지출 한눈에 보기\n카드 사용처 확인\n오전 10:46\n" +
+            "[Web발신] 확인된 발신번호\n승인\nIBK기업BC(9955)\n3,600원 사용\n법인\n일시불\n10 / 21 12:00\nGS25초월용수점\n오늘 지출 한눈에 보기\n카드 사용처 확인\n오후 12:01\n입력할 수 없는 대화방입니다"
+        val l = CardImport.parseText(ocr, R0, CardParser.DEFAULT_KEYWORDS, "image")
+        assertEquals(2, l.size); assertEquals(58500L, l.sumOf { it.amount })
+        assertEquals("네이버파이낸셜(주)", l[0].merchant); assertEquals("GS25초월용수점", l[1].merchant)
+        assertEquals("9955", l[1].card); assertEquals(LocalDateTime.of(2026, 10, 21, 12, 0), l[1].ts); assertTrue(l.all { it.isBc })
+        // 같은 결제가 이미 알림으로 들어와 있으면 중복 아님 처리
+        assertTrue(sameCardTx(l[0], l[0].copy(source = "sms", raw = "x")))
+    }
 }

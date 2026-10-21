@@ -72,15 +72,17 @@ class CardNotifService : NotificationListenerService() {
         }
         if (texts.isEmpty()) {
             val big = (ex.getCharSequence(Notification.EXTRA_BIG_TEXT) ?: ex.getCharSequence(Notification.EXTRA_TEXT))?.toString() ?: ""
-            texts += if (source == "sms") big else "$title\n$big"
+            texts += big
         }
+        // 보낸 이 이름(예: '비씨카드')이 글자면 앞에 붙여 BC 판별에 쓰기 (RCS 카드형 메시지 알림은 본문에 'BC'가 없을 수 있음)
+        val head = if (sender.isEmpty() && title.isNotBlank()) "$title\n" else ""
         val at = LocalDateTime.ofInstant(Instant.ofEpochMilli(sbn.postTime), ZoneId.systemDefault())
         var any = false
         for (t in texts.takeLast(5)) {
             // 빠른 거르기: 금액·승인/취소가 없으면 무시 (다른 앱 알림은 저장하지 않음)
             if (!t.contains("원") && !t.contains("USD")) continue
             if (!t.contains("승인") && !t.contains("취소") && !t.contains("결제")) continue
-            if (runCatching { CardIngest.ingest(this, sender, t, at, source) }.getOrDefault(false)) any = true
+            if (runCatching { CardIngest.ingest(this, sender, head + t, at, source) }.getOrDefault(false)) any = true
         }
         if (any) runCatching { Widgets.updateAll(this) }
     }
