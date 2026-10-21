@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -70,6 +71,7 @@ class MainActivity : ComponentActivity() {
         Engine.checkToday(this)
         Scheduler.scheduleAll(this)
         Geo.register(this)
+        runCatching { CardIngest.catchUp(this) } // 놓친 카드 문자 이어서 읽기
     }
 
     private fun afterReady() {
@@ -134,7 +136,7 @@ fun SplashScreen() {
 fun AppRoot(version: Int, tab: Int, setTab: (Int) -> Unit, bump: () -> Unit) {
     var month by remember { mutableStateOf(YearMonth.now()) }
     val tabs = listOf("홈" to Icons.Filled.Home, "근무기록" to Icons.Filled.DateRange,
-        "급여" to Icons.Filled.List, "재미" to Icons.Filled.Star, "설정" to Icons.Filled.Settings)
+        "급여" to Icons.Filled.List, "카드" to Icons.Filled.ShoppingCart, "재미" to Icons.Filled.Star, "설정" to Icons.Filled.Settings)
     // 뒤로가기 상태: 홈에서 한 번 누르면 '대기', 대기 중 한 번 더 누르면 종료 (메시지 없음)
     var armed by remember { mutableStateOf(false) }
     Scaffold(
@@ -143,18 +145,19 @@ fun AppRoot(version: Int, tab: Int, setTab: (Int) -> Unit, bump: () -> Unit) {
             NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                 tabs.forEachIndexed { i, (label, icon) ->
                     NavigationBarItem(selected = tab == i, onClick = { armed = false; setTab(i) },
-                        icon = { Icon(icon, label) }, label = { Text(label) })
+                        icon = { Icon(icon, label) }, label = { Text(label, fontSize = 11.sp, maxLines = 1) })
                 }
             }
         },
     ) { pad ->
         val m = Modifier.padding(pad)
         when (tab) {
-            0 -> HomeScreen(version, bump, m, goSettings = { armed = false; setTab(4) }, goRecords = { armed = false; setTab(1) },
-                goFun = { armed = false; setTab(3) })
+            0 -> HomeScreen(version, bump, m, goSettings = { armed = false; setTab(5) }, goRecords = { armed = false; setTab(1) },
+                goFun = { armed = false; setTab(4) })
             1 -> RecordsScreen(version, bump, month, { month = it }, m)
             2 -> PayScreen(version, bump, month, { month = it }, m)
-            3 -> FunScreen(m)
+            3 -> CardScreen(version, bump, m)
+            4 -> FunScreen(m)
             else -> SettingsScreen(version, bump, m)
         }
     }

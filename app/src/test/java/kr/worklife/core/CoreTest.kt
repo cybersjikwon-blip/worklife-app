@@ -410,4 +410,60 @@ class CoreTest {
         val b = tr(); b.feedAll(list, resume = at("15:30"))
         assertTrue(b.checkout != null && !b.checkout!!.isBefore(at("16:55")))
     }
+
+    // ── 12: 카드 문자
+    private val R0 = LocalDateTime.of(2026, 10, 21, 18, 0)
+    @Test fun bcMultiLine() {
+        val t = CardParser.parse("15884000", "[Web발신]\nBC카드(1234)승인\n홍*동\n12,300원 일시불\n10/21 14:23\n스타벅스강남점\n누적1,234,560원", R0)!!
+        assertEquals(12300L, t.amount); assertEquals("1234", t.card); assertEquals("홍*동", t.name)
+        assertEquals(LocalDateTime.of(2026, 10, 21, 14, 23), t.ts); assertEquals("스타벅스강남점", t.merchant); assertTrue(t.isBc)
+    }
+    @Test fun bcOneLine() {
+        val t = CardParser.parse("15884000", "[Web발신]\n비씨(1*2*)홍길동님 10/21 12:05 8,000원 일시불 김밥천국 누적 512,300원", R0)!!
+        assertEquals(8000L, t.amount); assertEquals("1*2*", t.card); assertEquals("김밥천국", t.merchant)
+    }
+    @Test fun bcCancelNegative() {
+        val t = CardParser.parse("15884000", "[Web발신]\nBC카드(1234)취소\n홍*동\n12,300원\n10/21 15:00\n스타벅스강남점", R0)!!
+        assertEquals(-12300L, t.amount)
+    }
+    @Test fun nonCardRejected() {
+        assertNull(CardParser.parse("15882100", "[Web발신]\n농협 입금 50,000원 10/21 잔액 1,000,000원", R0))
+        assertNull(CardParser.parse("15884000", "BC카드(1234) 승인거절 한도초과 30,000원", R0))
+        assertNull(CardParser.parse("01012345678", "오늘 저녁 3만원 보낼게", R0))
+    }
+    @Test fun installmentAndForeign() {
+        val t = CardParser.parse("15884000", "BC카드(5678)승인 김*수 360,000원 03개월 10/20 19:10 하이마트", R0)!!
+        assertEquals(3, t.installment); assertEquals("김*수", t.name); assertEquals(360000L, t.amount)
+        val f = CardParser.parse("15884000", "[Web발신]\nBC카드(1234)승인\n홍*동\nUSD 12.50\n10/21 03:10\nAMAZON", R0)!!
+        assertEquals(0L, f.amount); assertTrue(f.foreign.contains("12.50"))
+    }
+    @Test fun yearRollover() {
+        val t = CardParser.parse("15884000", "BC카드(1234)승인 홍*동 5,000원 일시불 12/31 23:50 편의점", LocalDateTime.of(2027, 1, 1, 0, 5))!!
+        assertEquals(2026, t.ts.year)
+    }
+    @Test fun cardSummaryPeople() {
+        val ppl = listOf(CardPerson("나", "010-1111-2222", listOf("1234")), CardPerson("아내", "01033334444", listOf("5678")))
+        val d = LocalDateTime.of(2026, 10, 10, 12, 0)
+        val txs = listOf(
+            CardTx(ts = d, amount = 10000, card = "1234", isBc = true),
+            CardTx(ts = d, amount = -2000, card = "1234", isBc = true),
+            CardTx(ts = d, amount = 30000, card = "9*9*", sender = "01033334444", isBc = true), // 아내 폰에서 전달된 문자
+            CardTx(ts = d, amount = 7000, card = "4321", isBc = true),                          // 미지정 BC
+            CardTx(ts = d, amount = 50000, card = "9999", isBc = false),                        // 다른 카드사
+            CardTx(ts = d.minusMonths(1), amount = 99999, card = "1234", isBc = true))          // 기간 밖
+        val sm = summarizeCards(txs, ppl, LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 31), bcOnly = true)
+        assertEquals(45000L, sm.total); assertEquals(8000L, sm.perPerson[0].first); assertEquals(30000L, sm.perPerson[1].first)
+        assertEquals(7000L, sm.unassigned.first); assertEquals(50000L, sm.otherCards["9999"]); assertEquals(-2000L, sm.cancelTotal)
+        assertEquals(95000L, summarizeCards(txs, ppl, LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 31), bcOnly = false).total)
+    }
+    @Test fun cardDedupeAndRange() {
+        val a = CardTx(ts = R0, amount = 5000, card = "1234", source = "sms", raw = "x")
+        assertTrue(sameCardTx(a, a.copy(ts = R0.plusMinutes(1), source = "noti", raw = "y")))
+        assertTrue(!sameCardTx(a, a.copy(ts = R0.plusMinutes(1), raw = "y")))   // 같은 출처 다른 문자 = 실제 2번 결제
+        assertTrue(!sameCardTx(a, a.copy(amount = 5100, source = "noti")))
+        val (s1, e1) = cardRange(CardPeriod("cycle", 14), LocalDate.of(2026, 10, 5))
+        assertEquals(LocalDate.of(2026, 9, 14), s1); assertEquals(LocalDate.of(2026, 10, 13), e1)
+        val (s2, e2) = cardRange(CardPeriod("custom", customStart = LocalDate.of(2026, 8, 3)), LocalDate.of(2026, 10, 21))
+        assertEquals(LocalDate.of(2026, 8, 3), s2); assertEquals(LocalDate.of(2026, 10, 21), e2)
+    }
 }

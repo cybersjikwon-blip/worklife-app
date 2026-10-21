@@ -21,6 +21,7 @@ data class WidgetData(
     val company: String, val status: String, val sub: String, val working: Boolean,
     val otToday: String, val otWeek: String, val otMonth: String,
     val pay: String, val leave: String, val canCheckout: Boolean,
+    val extra: String = "",
 )
 
 object Widgets {
@@ -74,8 +75,29 @@ object Widgets {
         return WidgetData(c.name, status, sub, working,
             hmS(sum.todayMin), hmS(sum.weekMin), hmS(sum.monthMin),
             "급여일 ${np.payDate.monthValue}/${np.payDate.dayOfMonth} " + (if (dday == 0L) "오늘!" else "D-$dday") + " · 예상 ${won(npPay.net)}",
-            "남은 연차 ${days(lv.remaining)}", canOut)
+            "남은 연차 ${days(lv.remaining)}", canOut, extraLine(ctx, c, today, sum))
     }
+
+    /** 큰 위젯 아랫줄 (설정에서 선택) */
+    fun extraLine(ctx: Context, c: Company, today: LocalDate, sum: OtSummary? = null): String = runCatching {
+        val repo = Repo.get(ctx)
+        when (repo.widgetExtra) {
+            "card" -> {
+                val p = repo.cardPeriod
+                val (s, e) = cardRange(p, today)
+                val sm = summarizeCards(repo.cardTxs(s, e), repo.cardPeople, s, e, repo.cardBcOnly)
+                "💳 카드 ${s.monthValue}/${s.dayOfMonth}~ 사용 ${won(sm.total.toInt())} (${sm.count}건)"
+            }
+            "holiday" -> {
+                val cal = HolidayCalendar(c)
+                val wk = setOf("토요일", "일요일", "휴무요일")
+                val next = (1L..400L).map { today.plusDays(it) }.firstOrNull { d -> cal.holidayName(d)?.let { it !in wk } == true }
+                if (next == null) "" else "🎉 ${cal.holidayName(next)} ${next.monthValue}/${next.dayOfMonth} · D-${ChronoUnit.DAYS.between(today, next)}"
+            }
+            "week" -> sum?.let { "⏱ 이번 주 연장 ${hmS(it.weekMin)} / ${it.weekLimitMin / 60}시간" } ?: ""
+            else -> ""
+        }
+    }.getOrDefault("")
 
     private fun openApp(ctx: Context) = PendingIntent.getActivity(ctx, 100,
         Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
@@ -99,6 +121,8 @@ object Widgets {
         setTextViewText(R.id.w_ot_month, d.otMonth)
         setTextViewText(R.id.w_pay, d.pay)
         setTextViewText(R.id.w_leave, d.leave)
+        setTextViewText(R.id.w_extra, d.extra)
+        setViewVisibility(R.id.w_extra, if (d.extra.isBlank()) android.view.View.GONE else android.view.View.VISIBLE)
         setViewVisibility(R.id.w_btn_out, if (d.canCheckout) android.view.View.VISIBLE else android.view.View.GONE)
         setOnClickPendingIntent(R.id.w_btn_out, PendingIntent.getBroadcast(ctx, 101,
             Intent(ctx, LargeWidget::class.java).setAction(ACTION_CHECKOUT), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))

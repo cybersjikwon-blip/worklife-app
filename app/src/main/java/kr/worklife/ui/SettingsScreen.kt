@@ -9,6 +9,7 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -39,6 +40,7 @@ fun SettingsScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
         CompanyHistoryCard(companies, company, onEdit = { editId = it }, bump = bump, onNew = { editId = it })
 
         key(version) { PersonalForm(bump) }
+        WidgetCard()
         UpdateCard(version, bump)
         PermissionCard(version, bump)
 
@@ -51,6 +53,26 @@ fun SettingsScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
         Spacer(Modifier.height(24.dp))
     }
 
+}
+
+/** 큰 위젯(4×2) 맨 아랫줄에 무엇을 보여줄지 */
+@Composable
+private fun WidgetCard() {
+    val ctx = LocalContext.current
+    val repo = Repo.get(ctx)
+    var sel by remember { mutableStateOf(repo.widgetExtra) }
+    SCard {
+        CardTitle("위젯")
+        Text("큰 위젯(근무 요약) 맨 아랫줄", fontSize = 14.sp)
+        listOf("card" to "카드 사용액 (카드 탭 기간)", "holiday" to "다음 공휴일 D-day", "week" to "이번 주 연장 / 한도", "none" to "표시 안 함").forEach { (k, l) ->
+            Row(Modifier.fillMaxWidth().clickable {
+                sel = k; repo.widgetExtra = k; runCatching { kr.worklife.bg.Widgets.updateAll(ctx) }
+            }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(selected = sel == k, onClick = { sel = k; repo.widgetExtra = k; runCatching { kr.worklife.bg.Widgets.updateAll(ctx) } })
+                Text(l, fontSize = 15.sp)
+            }
+        }
+    }
 }
 
 /** 회사 이력 + [퇴사] / [회사 옮기기] / [새 회사 등록] / [퇴사 취소] + 예상 퇴직금 */

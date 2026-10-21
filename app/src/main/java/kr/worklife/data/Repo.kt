@@ -16,7 +16,7 @@ import java.time.YearMonth
 data class PayHistory(val ym: YearMonth, val companyId: Long, val companyName: String,
                       val gross: Int, val deduct: Int, val net: Int, val kind: String, val lines: List<PayLine>)
 
-class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.db", null, 3) {
+class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.db", null, 4) {
     private val prefs = ctx.getSharedPreferences("worklife", Context.MODE_PRIVATE)
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -24,6 +24,12 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
         db.execSQL("CREATE TABLE locs(ts TEXT, lat REAL, lon REAL, acc REAL, kind TEXT)")
         db.execSQL("CREATE INDEX idx_locs ON locs(ts)")
         db.execSQL("CREATE TABLE payslips(ym TEXT, company INTEGER, json TEXT, kind TEXT, saved_at TEXT, PRIMARY KEY(ym, company))")
+        createCards(db)
+    }
+
+    private fun createCards(db: SQLiteDatabase) {
+        db.execSQL("CREATE TABLE cards(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, amount INTEGER, merchant TEXT, card TEXT, sender TEXT, name TEXT, inst INTEGER, foreign_amt TEXT, bc INTEGER, source TEXT, raw TEXT, excluded INTEGER DEFAULT 0, person INTEGER DEFAULT -1)")
+        db.execSQL("CREATE INDEX idx_cards ON cards(ts)")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {
@@ -31,6 +37,8 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
         if (o < 2) runCatching { db.execSQL("ALTER TABLE locs ADD COLUMN kind TEXT") }
         // v3: 점심 초과 시간(분)
         if (o < 3) runCatching { db.execSQL("ALTER TABLE days ADD COLUMN lov INTEGER DEFAULT 0") }
+        // v4: 카드 사용 내역
+        if (o < 4) runCatching { createCards(db) }
     }
 
     // ───────── 설정 ─────────
@@ -254,6 +262,81 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
     var voiceOn: Boolean
         get() = prefs.getBoolean("voiceOn", false)
         set(v) { prefs.edit().putBoolean("voiceOn", v).apply() }
+
+    // ───────── 카드 사용 내역 ─────────
+    private fun txValues(t: CardTx) = ContentValues().apply {
+        put("ts", t.ts.withSecond(0).withNano(0).toString()); put("amount", t.amount); put("merchant", t.merchant); put("card", t.card)
+        put("sender", t.sender); put("name", t.name); put("inst", t.installment); put("foreign_amt", t.foreign); put("bc", if (t.isBc) 1 else 0)
+        put("source", t.source); put("raw", t.raw); put("excluded", if (t.excluded) 1 else 0); put("person", t.person)
+    }
+
+    /** 새 내역 저장. 이미 있는 결제(문자+알림톡 중복 등)면 저장 안 하고 false */
+    @Synchronized
+    fun addCardTx(t: CardTx): Boolean {
+        val near = cardTxs("ts >= ? AND ts <= ?", arrayOf(t.ts.minusMinutes(4).toString(), t.ts.plusMinutes(4).toString()))
+        if (near.any { sameCardTx(it, t) || (it.raw.isNotEmpty() && it.raw == t.raw && it.ts == t.ts.withSecond(0).withNano(0)) }) return false
+        writableDatabase.insert("cards", null, txValues(t))
+        return true
+    }
+
+    fun updateCardTx(t: CardTx) { writableDatabase.update("cards", txValues(t), "id=?", arrayOf(t.id.toString())) }
+    fun deleteCardTx(id: Long) { writableDatabase.delete("cards", "id=?", arrayOf(id.toString())) }
+
+    fun cardTxs(from: LocalDate, to: LocalDate): List<CardTx> =
+        cardTxs("ts >= ? AND ts < ?", arrayOf(from.atStartOfDay().toString(), to.plusDays(1).atStartOfDay().toString()))
+
+    fun cardTxCount(): Int = readableDatabase.rawQuery("SELECT COUNT(*) FROM cards", null).use { if (it.moveToFirst()) it.getInt(0) else 0 }
+
+    private fun cardTxs(where: String, args: Array<String>): List<CardTx> =
+        readableDatabase.query("cards", null, where, args, null, null, "ts DESC").use { c ->
+            fun str(n: String) = c.getColumnIndex(n).let { if (it < 0 || c.isNull(it)) "" else c.getString(it) }
+            fun int(n: String) = c.getColumnIndex(n).let { if (it < 0 || c.isNull(it)) 0L else c.getLong(it) }
+            buildList {
+                while (c.moveToNext()) runCatching {
+                    add(CardTx(int("id"), LocalDateTime.parse(str("ts")), int("amount"), str("merchant"), str("card"), str("sender"), str("name"),
+                        int("inst").toInt(), str("foreign_amt"), int("bc") == 1L, str("source").ifEmpty { "sms" }, str("raw"),
+                        int("excluded") == 1L, c.getColumnIndex("person").let { if (it < 0 || c.isNull(it)) -1 else c.getInt(it) }))
+                }
+            }
+        }
+
+    var cardPeople: List<CardPerson>
+        get() = runCatching {
+            val a = JSONArray(prefs.getString("cardPeople", "[]"))
+            (0 until a.length()).map { i -> a.getJSONObject(i).let { o ->
+                CardPerson(o.optString("name"), o.optString("phone"),
+                    o.optString("cards").split(",").map { it.trim() }.filter { it.isNotEmpty() }, o.optString("hint"))
+            } }
+        }.getOrDefault(emptyList())
+        set(v) { prefs.edit().putString("cardPeople", JSONArray(v.take(CardPerson.MAX).map { p ->
+            JSONObject().put("name", p.name).put("phone", p.phone).put("cards", p.cards.joinToString(",")).put("hint", p.nameHint) }).toString()).apply() }
+
+    var cardPeriod: CardPeriod
+        get() = runCatching { JSONObject(prefs.getString("cardPeriod", "{}")!!).let { o ->
+            CardPeriod(o.optString("mode", "month"), o.optInt("cycle", 1),
+                o.optString("s").takeIf { it.isNotEmpty() }?.let { LocalDate.parse(it) },
+                o.optString("e").takeIf { it.isNotEmpty() }?.let { LocalDate.parse(it) }) } }.getOrDefault(CardPeriod())
+        set(v) { prefs.edit().putString("cardPeriod", JSONObject().put("mode", v.mode).put("cycle", v.cycleStartDay)
+            .put("s", v.customStart?.toString() ?: "").put("e", v.customEnd?.toString() ?: "").toString()).apply() }
+
+    /** BC 문자만 합산 (등록한 카드·번호는 항상 포함) */
+    var cardBcOnly: Boolean
+        get() = prefs.getBoolean("cardBcOnly", true)
+        set(v) { prefs.edit().putBoolean("cardBcOnly", v).apply() }
+
+    var cardKeywords: List<String>
+        get() = (prefs.getString("cardKeywords", null) ?: CardParser.DEFAULT_KEYWORDS.joinToString(",")).split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        set(v) { prefs.edit().putString("cardKeywords", v.joinToString(",")).apply() }
+
+    /** 문자함에서 마지막으로 읽은 문자 시각(ms) — 다음엔 그 뒤만 읽음 */
+    var cardSmsScannedUntil: Long
+        get() = prefs.getLong("cardSmsScan", 0L)
+        set(v) { prefs.edit().putLong("cardSmsScan", v).apply() }
+
+    /** 큰 위젯 아랫줄: card / net / holiday / week / none */
+    var widgetExtra: String
+        get() = prefs.getString("widgetExtra", "card") ?: "card"
+        set(v) { prefs.edit().putString("widgetExtra", v).apply() }
 
     // ───────── 급여 이력 ─────────
     fun savePayslip(p: Payslip) = savePay(p.ym, p.companyId, p.companyName, p.gross, p.totalDeduct, p.net, "확정", p.lines())

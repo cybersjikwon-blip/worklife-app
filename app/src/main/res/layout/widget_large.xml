@@ -39,4 +39,7 @@
         android:layout_marginTop="8dp" android:textColor="@color/w_text" android:textSize="13sp" android:maxLines="1" android:text="" />
     <TextView android:id="@+id/w_leave" android:layout_width="match_parent" android:layout_height="wrap_content"
         android:textColor="@color/w_sub" android:textSize="12sp" android:maxLines="1" android:text="" />
+    <TextView android:id="@+id/w_extra" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginTop="6dp" android:paddingTop="6dp" android:textColor="@color/w_text" android:textSize="14sp"
+        android:textStyle="bold" android:maxLines="1" android:ellipsize="end" android:text="" />
 </LinearLayout>
