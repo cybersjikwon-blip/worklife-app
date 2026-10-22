@@ -45,11 +45,41 @@ fun Location.toSample(kind: String = "fix") = LocSample(
 object Notif {
     const val CH_TRACK = "track"
     const val CH_EVENT = "event"
+    const val CH_CARD = "card_added"
 
     fun init(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(CH_TRACK, "퇴근 감지 중", NotificationManager.IMPORTANCE_LOW))
         nm.createNotificationChannel(NotificationChannel(CH_EVENT, "퇴근 기록·확인 요청", NotificationManager.IMPORTANCE_DEFAULT))
+        // 카드 집계: 잠깐 위에 떴다가 사라짐. 소리 없음 (진동은 앱이 직접 짧게)
+        nm.createNotificationChannel(NotificationChannel(CH_CARD, "카드 사용 집계", NotificationManager.IMPORTANCE_HIGH).apply {
+            setSound(null, null); enableVibration(false); setShowBadge(false)
+        })
+    }
+
+    /** 카드 승인 집계 알림: 짧은 진동 + 약 5초 뒤 자동으로 사라짐 */
+    @SuppressLint("MissingPermission")
+    fun cardAdded(ctx: Context, title: String, text: String) {
+        init(ctx)
+        vibrateShort(ctx)
+        val nm = NotificationManagerCompat.from(ctx)
+        if (!nm.areNotificationsEnabled()) return
+        try {
+            nm.notify(40, NotificationCompat.Builder(ctx, CH_CARD).setSmallIcon(R.drawable.ic_stat)
+                .setContentTitle(title).setContentText(text).setSilent(true)
+                .setPriority(NotificationCompat.PRIORITY_HIGH).setCategory(NotificationCompat.CATEGORY_STATUS)
+                .setTimeoutAfter(5_000).setAutoCancel(true).setContentIntent(openApp(ctx)).build())
+        } catch (_: SecurityException) { }
+    }
+
+    /** 무음 모드에서도 짧게 두 번 '드륵드륵' */
+    fun vibrateShort(ctx: Context) {
+        runCatching {
+            val v = if (android.os.Build.VERSION.SDK_INT >= 31)
+                ctx.getSystemService(android.os.VibratorManager::class.java).defaultVibrator
+            else @Suppress("DEPRECATION") ctx.getSystemService(android.os.Vibrator::class.java)
+            if (v?.hasVibrator() == true) v.vibrate(android.os.VibrationEffect.createWaveform(longArrayOf(0, 120, 90, 120), -1))
+        }
     }
 
     fun openApp(ctx: Context): PendingIntent = PendingIntent.getActivity(ctx, 0,

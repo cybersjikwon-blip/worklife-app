@@ -84,9 +84,11 @@ object Widgets {
         when (repo.widgetExtra) {
             "card" -> {
                 val p = repo.cardPeriod
-                val (s, e) = cardRange(p, today)
-                val sm = summarizeCards(repo.cardTxs(s, e), repo.cardPeople, s, e, repo.cardBcOnly)
-                "💳 카드 ${s.monthValue}/${s.dayOfMonth}~ 사용 ${won(sm.total.toInt())} (${sm.count}건)"
+                val ppl = repo.cardPeople
+                val (s, e) = cardSpan(p, ppl, today)
+                val sm = summarizeNow(repo.cardTxs(s, e), ppl, p, repo.cardBcOnly, today)
+                val (cs, _) = cardRange(p, today)
+                "💳 카드 " + (if (ppl.any { it.ownPeriod }) "이번 기간" else "${cs.monthValue}/${cs.dayOfMonth}~") + " 사용 ${won(sm.total.toInt())} (${sm.count}건)"
             }
             "holiday" -> {
                 val cal = HolidayCalendar(c)

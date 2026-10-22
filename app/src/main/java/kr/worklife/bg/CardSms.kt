@@ -25,11 +25,30 @@ object CardIngest {
     fun ingest(ctx: Context, sender: String, body: String, at: LocalDateTime, source: String): Boolean =
         ingestWithResult(ctx, sender, body, at, source) == "추가"
 
-    /** "추가" / "이미 있음" / "카드 승인 아님" */
-    fun ingestWithResult(ctx: Context, sender: String, body: String, at: LocalDateTime, source: String): String {
+    /** "추가" / "이미 있음" / "카드 승인 아님". notify = 실시간 수신이면 집계 알림(진동) */
+    fun ingestWithResult(ctx: Context, sender: String, body: String, at: LocalDateTime, source: String, notify: Boolean = false): String {
         val repo = Repo.get(ctx)
         val tx = CardParser.parse(sender, body, at, repo.cardKeywords, source) ?: return "카드 승인 아님"
-        return if (repo.addCardTx(tx)) "추가" else "이미 있음"
+        if (!repo.addCardTx(tx)) return "이미 있음"
+        if (notify) runCatching { notifyAdded(ctx, tx) }
+        return "추가"
+    }
+
+    /** "💳 IBK기업BC 54,900원 집계 · 이번 기간 누적 ○○원" (진동, 5초 뒤 사라짐). 합산 제외 카드는 조용히 저장만 */
+    fun notifyAdded(ctx: Context, tx: kr.worklife.core.CardTx) {
+        val repo = Repo.get(ctx)
+        val ppl = repo.cardPeople
+        val bcOnly = repo.cardBcOnly
+        if (!kr.worklife.core.cardIncluded(tx, ppl, bcOnly)) return
+        val today = java.time.LocalDate.now()
+        val (s, e) = kr.worklife.core.cardSpan(repo.cardPeriod, ppl, today)
+        val sm = kr.worklife.core.summarizeNow(repo.cardTxs(s, e), ppl, repo.cardPeriod, bcOnly, today)
+        val i = kr.worklife.core.matchPerson(tx, ppl)
+        val who = if (i >= 0) ppl[i].name else tx.card.ifBlank { "카드" }.let { if (tx.isBc) "BC($it)" else it }
+        val amt = "%,d원".format(kotlin.math.abs(tx.amount))
+        val title = if (tx.isCancel) "💳 $who $amt 취소 반영" else "💳 $who $amt 집계"
+        val cardSum = if (i >= 0) " · ${ppl[i].name} ${"%,d원".format(sm.perPerson[i].first)}" else ""
+        Notif.cardAdded(ctx, title, (tx.merchant.ifBlank { "" }.let { if (it.isNotEmpty()) "$it · " else "" }) + "누적 ${"%,d원".format(sm.total)}$cardSum")
     }
 
     // ───────── 진단: 알림 연결 상태와 최근 받은 카드 관련 알림 (기기 안에만 보관) ─────────
@@ -116,7 +135,8 @@ class CardNotifService : NotificationListenerService() {
             // 빠른 거르기: 금액이 없으면 무시 (다른 알림은 저장·기록하지 않음)
             if (!Regex("""\d\s*원|USD|달러""").containsMatchIn(full)) continue
             if (!Regex("승인|취소|결제|사용|일시불|개월|카드|BC|비씨", RegexOption.IGNORE_CASE).containsMatchIn(full)) continue
-            val r = runCatching { CardIngest.ingestWithResult(this, sender, full, at, source) }.getOrDefault("오류")
+            // 실시간 알림만 진동 알림 (앱 연결 직후 밀린 알림 처리 때는 조용히)
+            val r = runCatching { CardIngest.ingestWithResult(this, sender, full, at, source, notify = !fromBacklog) }.getOrDefault("오류")
             if (!fromBacklog || r == "추가") CardIngest.logNoti(this, pkg, full, r)
             if (r == "추가") any = true
         }

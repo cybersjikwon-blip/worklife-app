@@ -306,11 +306,13 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
             val a = JSONArray(prefs.getString("cardPeople", "[]"))
             (0 until a.length()).map { i -> a.getJSONObject(i).let { o ->
                 CardPerson(o.optString("name"), o.optString("phone"),
-                    o.optString("cards").split(",").map { it.trim() }.filter { it.isNotEmpty() }, o.optString("hint"))
+                    o.optString("cards").split(",").map { it.trim() }.filter { it.isNotEmpty() }, o.optString("hint"),
+                    o.optInt("cycle", 0), o.optString("start").takeIf { it.isNotEmpty() }?.let { runCatching { LocalDate.parse(it) }.getOrNull() })
             } }
         }.getOrDefault(emptyList())
         set(v) { prefs.edit().putString("cardPeople", JSONArray(v.take(CardPerson.MAX).map { p ->
-            JSONObject().put("name", p.name).put("phone", p.phone).put("cards", p.cards.joinToString(",")).put("hint", p.nameHint) }).toString()).apply() }
+            JSONObject().put("name", p.name).put("phone", p.phone).put("cards", p.cards.joinToString(",")).put("hint", p.nameHint)
+                .put("cycle", p.cycleDay).put("start", p.start?.toString() ?: "") }).toString()).apply() }
 
     var cardPeriod: CardPeriod
         get() = runCatching { JSONObject(prefs.getString("cardPeriod", "{}")!!).let { o ->

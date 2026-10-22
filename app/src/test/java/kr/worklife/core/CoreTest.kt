@@ -522,4 +522,19 @@ class CoreTest {
         val c = CardParser.parse("15884000", "1588-4000\n12,000원 사용 일시불", R0)!!
         assertTrue(c.isBc)
     }
+    @Test fun perCardPeriods() {
+        val today = LocalDate.of(2026, 10, 22)
+        val ppl = listOf(CardPerson("A", cards = listOf("1111")),                       // 공통(이번 달)
+            CardPerson("B", cards = listOf("2222"), cycleDay = 14),                       // 9/14~ → 10/14~11/13
+            CardPerson("C", cards = listOf("3333"), start = LocalDate.of(2026, 9, 20)))  // 9/20~오늘
+        val common = CardPeriod("month")
+        assertEquals(LocalDate.of(2026, 10, 14), personRange(ppl[1], common, today).first)
+        val (sf, _) = cardSpan(common, ppl, today); assertEquals(LocalDate.of(2026, 9, 20), sf)
+        fun t(d: Int, m: Int, a: Long, c: String) = CardTx(ts = LocalDate.of(2026, m, d).atTime(12, 0), amount = a, card = c, isBc = true)
+        val txs = listOf(t(5, 10, 1000, "1111"), t(25, 9, 9000, "1111"),   // A: 10/5만
+            t(10, 10, 2000, "2222"), t(15, 10, 3000, "2222"),               // B: 10/15만
+            t(21, 9, 4000, "3333"), t(19, 9, 7000, "3333"))                 // C: 9/21만
+        val sm = summarizeNow(txs, ppl, common, true, today)
+        assertEquals(listOf(1000L, 3000L, 4000L), sm.perPerson.map { it.first }); assertEquals(8000L, sm.total)
+    }
 }

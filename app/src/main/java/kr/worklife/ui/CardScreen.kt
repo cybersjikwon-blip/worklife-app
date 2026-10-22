@@ -41,8 +41,12 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
     val people = remember(version, tick) { repo.cardPeople }
     val bcOnly = remember(version, tick) { repo.cardBcOnly }
     val (from, to) = cardRange(period, today)
-    val txs = remember(version, tick, from, to) { repo.cardTxs(from, to) }
-    val sm = remember(txs, people, bcOnly) { summarizeCards(txs, people, from, to, bcOnly) }
+    // 카드마다 이용기간이 다를 수 있음 → 모든 기간을 덮어서 읽고, 카드별로 자기 기간만 합산
+    val pRanges = remember(people, period, today) { people.map { personRange(it, period, today) } }
+    val (spanFrom, spanTo) = remember(people, period, today) { cardSpan(period, people, today) }
+    val txs = remember(version, tick, spanFrom, spanTo) { repo.cardTxs(spanFrom, spanTo) }
+    val sm = remember(txs, people, bcOnly, pRanges) { summarizeCards(txs, people, from, to, bcOnly, pRanges) }
+    fun inRange(t: CardTx, r: Pair<LocalDate, LocalDate>) = !t.ts.toLocalDate().isBefore(r.first) && !t.ts.toLocalDate().isAfter(r.second)
 
     var filter by remember { mutableIntStateOf(-2) } // -2 전체, -1 미지정, 0~4 카드
     var editTx by remember { mutableStateOf<CardTx?>(null) }
@@ -123,7 +127,7 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
 
         // ── 기간: 언제부터 합산할지
         SCard {
-            CardTitle("언제부터 합산할까요?")
+            CardTitle("언제부터 합산할까요?", trailing = { if (people.any { it.ownPeriod }) Tag("카드별 기간 있음", OkGreen) })
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf("month" to "이번 달", "last" to "지난 달", "cycle" to "카드 이용기간", "custom" to "직접 지정").forEach { (k, l) ->
                     FilterChip(period.mode == k, {
@@ -169,7 +173,8 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
             val totalAbs = sm.total.coerceAtLeast(1)
             people.forEachIndexed { i, p ->
                 val (amt, n) = sm.perPerson.getOrElse(i) { 0L to 0 }
-                PersonRow(p.name, listOfNotNull(p.phone.ifBlank { null }, p.cards.takeIf { it.isNotEmpty() }?.joinToString(", ", "카드 ")).joinToString(" · "),
+                PersonRow(p.name, listOfNotNull(rangeText(pRanges[i]) + (if (p.ownPeriod) "" else " (공통)"), p.phone.ifBlank { null },
+                    p.cards.takeIf { it.isNotEmpty() }?.joinToString(", ", "끝자리 ")).joinToString(" · "),
                     amt, n, amt.toFloat() / totalAbs, filter == i) { filter = if (filter == i) -2 else i }
             }
             if (sm.unassigned.second > 0 || sm.unassigned.first != 0L)
@@ -198,7 +203,8 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
             val shown = txs.filter { t ->
                 when (filter) {
                     -2 -> true
-                    else -> cardIncluded(t, people, bcOnly) && matchPerson(t, people) == filter
+                    -1 -> cardIncluded(t, people, bcOnly) && matchPerson(t, people) == -1 && inRange(t, from to to)
+                    else -> cardIncluded(t, people, bcOnly) && matchPerson(t, people) == filter && inRange(t, pRanges.getOrElse(filter) { from to to })
                 }
             }
             if (shown.isEmpty()) Text(if (CardIngest.hasNotiAccess(ctx)) "이 기간 승인 내역이 없어요." else "알림 접근을 켜거나 아래에서 지난 내역을 불러오면 채워져요.", fontSize = 14.sp)
@@ -293,9 +299,11 @@ private fun PersonRow(name: String, sub: String, amount: Long, count: Int, ratio
 /** 카드 등록: 최대 5개. 카드 이름 / 문자 전화번호 / 카드 끝자리(쉼표) / 문자 속 이름(예: 홍*동) — 하나라도 맞으면 그 카드 */
 @Composable
 private fun PeopleDialog(init: List<CardPerson>, onDismiss: () -> Unit, onSave: (List<CardPerson>) -> Unit) {
+    val ctx = LocalContext.current
     val rows = remember { mutableStateListOf<Array<String>>().apply {
-        init.forEach { add(arrayOf(it.name, it.phone, it.cards.joinToString(", "), it.nameHint)) }
-        if (isEmpty()) add(arrayOf("카드 1", "", "", ""))
+        init.forEach { add(arrayOf(it.name, it.phone, it.cards.joinToString(", "), it.nameHint,
+            if (it.cycleDay in 1..28) it.cycleDay.toString() else "", it.start?.toString() ?: "")) }
+        if (isEmpty()) add(arrayOf("카드 1", "", "", "", "", ""))
     } }
     var ver by remember { mutableIntStateOf(0) }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("카드 등록 (최대 ${CardPerson.MAX}개)") },
@@ -313,16 +321,29 @@ private fun PeopleDialog(init: List<CardPerson>, onDismiss: () -> Unit, onSave: 
                         Field("문자 전화번호", b, { b = it; r[1] = it }, number = true, hint = "이 카드 승인 문자를 받는(전달해 주는) 폰 번호")
                         Field("카드 끝자리", c, { c = it; r[2] = it }, hint = "문자 속 (1234) 또는 1*2* 그대로 · 쉼표로 여러 개")
                         Field("문자 속 이름 (선택)", d, { d = it; r[3] = it }, hint = "예: 홍*동 — 끝자리·번호가 없을 때만 사용")
+                        // 카드별 합산 시작: 이용기간 시작일(매월 n일) 또는 직접 시작일. 둘 다 비우면 공통 기간
+                        var cy by remember { mutableStateOf(r[4]) }; var st by remember { mutableStateOf(r[5]) }
+                        Field("이용기간 시작일 (매월 며칠)", cy, { v -> cy = v.filter { ch -> ch.isDigit() }.take(2); r[4] = cy }, number = true,
+                            hint = "카드 명세서 '이용기간' 시작일 (1~28). 비우면 공통 기간")
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedButton(onClick = {
+                                pickDate(ctx, st.takeIf { it.isNotEmpty() }?.let { runCatching { LocalDate.parse(it) }.getOrNull() } ?: LocalDate.now().withDayOfMonth(1)) { dd -> st = dd.toString(); r[5] = st }
+                            }) { Text(if (st.isEmpty()) "직접 시작일 지정" else "시작 ${st}") }
+                            if (st.isNotEmpty()) TextButton(onClick = { st = ""; r[5] = "" }) { Text("지우기") }
+                        }
+                        if (st.isNotEmpty()) Text("직접 시작일이 있으면 이용기간보다 우선해서 ${st} ~ 오늘을 합산해요", fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
                         HorizontalDivider(Modifier.padding(vertical = 8.dp))
                     }
                 }
-                if (rows.size < CardPerson.MAX) TextButton(onClick = { rows.add(arrayOf("카드 ${rows.size + 1}", "", "", "")); ver++ }) { Text("+ 카드 추가") }
+                if (rows.size < CardPerson.MAX) TextButton(onClick = { rows.add(arrayOf("카드 ${rows.size + 1}", "", "", "", "", "")); ver++ }) { Text("+ 카드 추가") }
             }
         },
         confirmButton = {
             TextButton(onClick = {
                 onSave(rows.filter { it[0].isNotBlank() }.map { r ->
-                    CardPerson(r[0].trim(), r[1].trim(), r[2].split(",", " ").map { it.trim() }.filter { it.isNotEmpty() }, r[3].trim())
+                    CardPerson(r[0].trim(), r[1].trim(), r[2].split(",", " ").map { it.trim() }.filter { it.isNotEmpty() }, r[3].trim(),
+                        r[4].toIntOrNull()?.takeIf { it in 1..28 } ?: 0, r[5].takeIf { it.isNotEmpty() }?.let { runCatching { LocalDate.parse(it) }.getOrNull() })
                 })
             }) { Text("저장") }
         },

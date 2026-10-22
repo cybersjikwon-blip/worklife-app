@@ -31,8 +31,26 @@ data class CardTx(
 }
 
 /** 합산할 사람 (최대 5명). 카드 끝자리·전화번호·이름 중 하나라도 맞으면 그 사람 */
-data class CardPerson(val name: String, val phone: String = "", val cards: List<String> = emptyList(), val nameHint: String = "") {
+data class CardPerson(val name: String, val phone: String = "", val cards: List<String> = emptyList(), val nameHint: String = "",
+                      val cycleDay: Int = 0,             // 이 카드 이용기간 시작일 (매월 n일). 0 = 공통 기간 사용
+                      val start: LocalDate? = null) {    // 직접 지정 시작일 (있으면 이 날 ~ 오늘). cycleDay보다 우선
     companion object { const val MAX = 5 }
+    val ownPeriod get() = start != null || cycleDay in 1..28
+}
+
+/** 카드별 기간: 직접 시작일 > 매월 n일 이용기간 > 공통 기간 */
+fun personRange(p: CardPerson, common: CardPeriod, today: LocalDate): Pair<LocalDate, LocalDate> = when {
+    p.start != null -> (if (p.start.isAfter(today)) today else p.start) to today
+    p.cycleDay in 1..28 -> cardRange(CardPeriod("cycle", p.cycleDay), today)
+    else -> cardRange(common, today)
+}
+
+fun rangeText(r: Pair<LocalDate, LocalDate>) = "${r.first.monthValue}/${r.first.dayOfMonth}~${r.second.monthValue}/${r.second.dayOfMonth}"
+
+/** 공통 기간 + 카드별 기간을 모두 덮는 조회 범위 */
+fun cardSpan(common: CardPeriod, people: List<CardPerson>, today: LocalDate): Pair<LocalDate, LocalDate> {
+    val rs = listOf(cardRange(common, today)) + people.map { personRange(it, common, today) }
+    return rs.minOf { it.first } to rs.maxOf { it.second }
 }
 
 /** 집계 기간 설정 */
@@ -168,15 +186,28 @@ fun cardIncluded(tx: CardTx, people: List<CardPerson>, bcOnly: Boolean): Boolean
 data class CardSummary(val total: Long, val count: Int, val cancelTotal: Long, val perPerson: List<Pair<Long, Int>>,
                        val unassigned: Pair<Long, Int>, val foreignPending: Int, val otherCards: Map<String, Long>)
 
-fun summarizeCards(txs: List<CardTx>, people: List<CardPerson>, from: LocalDate, to: LocalDate, bcOnly: Boolean): CardSummary {
-    val inRange = txs.filter { !it.ts.toLocalDate().isBefore(from) && !it.ts.toLocalDate().isAfter(to) }
-    val inc = inRange.filter { cardIncluded(it, people, bcOnly) }
-    val per = people.indices.map { i -> inc.filter { matchPerson(it, people) == i }.let { l -> l.sumOf { it.amount } to l.count { !it.isCancel } } }
-    val un = inc.filter { matchPerson(it, people) < 0 }.let { l -> l.sumOf { it.amount } to l.count { !it.isCancel } }
-    val others = inRange.filter { !it.excluded && !cardIncluded(it, people, bcOnly) }
+/**
+ * 합계. personRanges가 있으면 카드마다 자기 기간으로 계산 (카드별 결제일·이용기간이 다를 때)
+ * 총합 = 카드별 합 + 미지정(공통 기간)
+ */
+fun summarizeCards(txs: List<CardTx>, people: List<CardPerson>, from: LocalDate, to: LocalDate, bcOnly: Boolean,
+                   personRanges: List<Pair<LocalDate, LocalDate>>? = null): CardSummary {
+    fun inR(t: CardTx, r: Pair<LocalDate, LocalDate>) = !t.ts.toLocalDate().isBefore(r.first) && !t.ts.toLocalDate().isAfter(r.second)
+    val common = from to to
+    val inc = txs.filter { cardIncluded(it, people, bcOnly) }
+    val counted = inc.filter { t -> val i = matchPerson(t, people); inR(t, if (i >= 0 && personRanges != null) personRanges.getOrElse(i) { common } else common) }
+    val per = people.indices.map { i -> counted.filter { matchPerson(it, people) == i }.let { l -> l.sumOf { it.amount } to l.count { !it.isCancel } } }
+    val un = counted.filter { matchPerson(it, people) < 0 }.let { l -> l.sumOf { it.amount } to l.count { !it.isCancel } }
+    val others = txs.filter { inR(it, common) && !it.excluded && !cardIncluded(it, people, bcOnly) }
         .groupBy { it.card.ifEmpty { "끝자리 없음" } }.mapValues { (_, l) -> l.sumOf { it.amount } }
-    return CardSummary(inc.sumOf { it.amount }, inc.count { !it.isCancel }, inc.filter { it.isCancel }.sumOf { it.amount },
-        per, un, inc.count { it.foreign.isNotEmpty() && it.amount == 0L }, others)
+    return CardSummary(counted.sumOf { it.amount }, counted.count { !it.isCancel }, counted.filter { it.isCancel }.sumOf { it.amount },
+        per, un, counted.count { it.foreign.isNotEmpty() && it.amount == 0L }, others)
+}
+
+/** 화면·위젯·알림 공통: 오늘 기준 전체 요약 */
+fun summarizeNow(all: List<CardTx>, people: List<CardPerson>, common: CardPeriod, bcOnly: Boolean, today: LocalDate): CardSummary {
+    val (f, t) = cardRange(common, today)
+    return summarizeCards(all, people, f, t, bcOnly, people.map { personRange(it, common, today) })
 }
 
 /** 같은 결제인지 (문자 + 알림톡 중복): 같은 카드·금액·부호, 3분 이내, 출처가 다르거나 원문이 같음 */
