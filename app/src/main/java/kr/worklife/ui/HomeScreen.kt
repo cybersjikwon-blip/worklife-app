@@ -1,5 +1,9 @@
 package kr.worklife.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -22,7 +26,8 @@ import java.time.YearMonth
 import java.time.temporal.ChronoUnit
 
 @Composable
-fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: () -> Unit, goRecords: () -> Unit, goFun: () -> Unit = {}) {
+fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: () -> Unit, goRecords: () -> Unit, goFun: () -> Unit = {},
+               goPay: () -> Unit = {}, goCard: () -> Unit = {}) {
     val ctx = LocalContext.current
     var now by remember { mutableStateOf(LocalDateTime.now()) }
     LaunchedEffect(Unit) { while (true) { delay(30_000); now = LocalDateTime.now() } }
@@ -63,13 +68,34 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
             else calcPayroll(c, s, np, buildPeriod(c, np, repo.period(np, c.id), today), today)
         val (ls, le) = leaveWindow(c, today)
         val leave = leaveSummary(c, today, repo.range(ls, le, c.id).values.toList())
-        HomeData(c, s, rec, tracker, live, sum, pay, monthRecs.filter { it.source == Source.NEEDS_CHECK }, period, np, npPay, leave)
+        // 카드 사용액 (카드를 쓰기 시작한 경우에만 '한눈에'에 표시)
+        val card = runCatching {
+            if (repo.cardTxCount() == 0) null else {
+                val cp = repo.cardPeriod; val ppl = repo.cardPeople
+                val (cs, ce) = cardSpan(cp, ppl, today)
+                summarizeNow(repo.cardTxs(cs, ce), ppl, cp, repo.cardBcOnly, today).let { it.total to "${it.count}건 · ${cardRangeLabel(cp, today).substringBefore(' ')}" }
+            }
+        }.getOrNull()
+        HomeData(c, s, rec, tracker, live, sum, pay, monthRecs.filter { it.source == Source.NEEDS_CHECK }, period, np, npPay, leave, card?.first, card?.second ?: "")
     }
     val c = data.c
     val hol = HolidayCalendar(c).holidayName(today)
 
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-        BigHeader("슬기로운 직장생활", "${c.name} · ${today.monthValue}월 ${today.dayOfMonth}일 (${wd(today)})")
+        // ── 상단: 인사 + 회사·날짜, 오른쪽 🔊 / ⚙ (네이버페이 화면 형식)
+        var voiceOn by remember { mutableStateOf(Voice.isOn(ctx)) }
+        Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 22.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(46.dp).background(MaterialTheme.colorScheme.primary.copy(alpha = .12f), androidx.compose.foundation.shape.CircleShape),
+                contentAlignment = Alignment.Center) { Text("🧑‍💼", fontSize = 24.sp) }
+            Column(Modifier.weight(1f).padding(start = 12.dp).clickable(onClick = goSettings)) {
+                Text(greeting(now), fontSize = 13.sp, color = HomeGreen, fontWeight = FontWeight.SemiBold)
+                Text("${c.name} · ${today.monthValue}월 ${today.dayOfMonth}일 (${wd(today)}) ›", fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            }
+            IconCircle(if (voiceOn) "🔊" else "🔇", if (voiceOn) HomeGreen.copy(alpha = .15f) else MaterialTheme.colorScheme.onSurface.copy(alpha = .06f)) {
+                voiceOn = !voiceOn; Voice.set(ctx, voiceOn)
+            }
+            IconCircle("⚙️", MaterialTheme.colorScheme.onSurface.copy(alpha = .06f), onClick = goSettings)
+        }
 
         // ── 최초 입사일 확인 (앱을 재직 중간부터 쓰는 경우 연차·퇴직금이 틀어지지 않게)
         if (!c.startConfirmed) SCard(color = MaterialTheme.colorScheme.primaryContainer) {
@@ -131,92 +157,153 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
             Text(data.needCheck.joinToString(", ") { "${it.day.dayOfMonth}일" } + " — 눌러서 확인", fontSize = 14.sp)
         }
 
-        // ── 오늘 (근무 중이면 옅은 녹색)
+        // ── 메인 카드 (진한 색, 근무 중이면 진한 녹색): [오늘 | 이번 주 | 이번 달] 탭
         val (title, sub) = todayStatus(c, data, hol, now)
         val field = Engine.isFieldWork(data.rec)
         val working = hol == null && (title == "근무 중" || title.startsWith("연장 근무 중") || title == "퇴근 감지 중" ||
             (field && now.toLocalTime().isBefore(hm(c.workEnd)) && now.toLocalTime().isAfter(hm(c.workStart))))
-        SCard(color = if (working) WorkingGreen else null, pad = 16.dp) {
-            var voiceOn by remember { mutableStateOf(Voice.isOn(ctx)) }
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        val sm = data.sum
+        val done = data.rec?.checkOut != null
+        val canAct = hol == null && data.rec?.status != Status.ABSENT && data.rec?.status != Status.LEAVE && data.rec?.status != Status.HALF_LEAVE
+        val checkoutNow = {
+            repo.saveDay(DayRecord(today, c.id, Status.WORK, hm(c.workStart), LocalTime.now().withSecond(0).withNano(0), Source.MANUAL, "수동 퇴근"))
+            Scheduler.cancelPoll(ctx); Voice.checkout(ctx); bump()
+        }
+        val pickCheckout = {
+            pickTime(ctx, data.rec?.checkOut ?: hm(c.workEnd)) { t ->
+                repo.saveDay(DayRecord(today, c.id, Status.WORK, hm(c.workStart), t, Source.MANUAL, "수동 입력")); bump()
+            }
+        }
+        var mainTab by remember { mutableIntStateOf(0) }
+        val bg by androidx.compose.animation.animateColorAsState(if (working) Color(0xFF0E5C3F) else Color(0xFF22262D),
+            androidx.compose.animation.core.tween(600), label = "main")
+        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp)
+            .background(bg, androidx.compose.foundation.shape.RoundedCornerShape(26.dp)).padding(bottom = 18.dp)) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                listOf("오늘", "이번 주", if (c.periodStartDay <= 1) "이번 달" else "이번 기간").forEachIndexed { i, l ->
+                    Column(Modifier.weight(1f).clickable { mainTab = i }.padding(vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(l, fontSize = 15.sp, fontWeight = if (mainTab == i) FontWeight.Bold else FontWeight.Normal,
+                            color = if (mainTab == i) Color.White else Color.White.copy(alpha = .45f))
+                        Box(Modifier.padding(top = 6.dp).height(3.dp).width(64.dp).background(if (mainTab == i) Color.White else Color.Transparent))
+                    }
+                }
+            }
+            Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("오늘", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f))
-                        if (working) Box(Modifier.padding(start = 6.dp)) { Tag(if (field) "외근" else "근무 중", OkGreen) }
+                        Box(Modifier.size(width = 38.dp, height = 44.dp).background(HomeGreen, androidx.compose.foundation.shape.RoundedCornerShape(8.dp)),
+                            contentAlignment = Alignment.Center) { Text(when (mainTab) { 0 -> "⏰"; 1 -> "📅"; else -> "🗓" }, fontSize = 18.sp) }
+                        Column(Modifier.padding(start = 10.dp)) {
+                            when (mainTab) {
+                                0 -> {
+                                    Text(if (working) (if (field) "외근 중" else "근무 중") else "오늘", fontSize = 13.sp, color = Color.White.copy(alpha = .75f))
+                                    Text(title, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1)
+                                }
+                                1 -> {
+                                    Text("이번 주 연장", fontSize = 13.sp, color = Color.White.copy(alpha = .75f))
+                                    Text(hmShort(sm.weekMin), fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                }
+                                else -> {
+                                    Text("${data.period.rangeText()} 연장", fontSize = 13.sp, color = Color.White.copy(alpha = .75f))
+                                    Text(hmShort(sm.monthMin), fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                }
+                            }
+                        }
                     }
-                    Text(title, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 2.dp))
-                    Text(sub, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f), maxLines = 2)
-                }
-                // 퇴근 음성 안내 켜기/끄기 (켜면 퇴근 순간 "퇴근합니다~!")
-                if (hol == null) Surface(onClick = { voiceOn = !voiceOn; Voice.set(ctx, voiceOn) },
-                    shape = androidx.compose.foundation.shape.CircleShape,
-                    color = if (voiceOn) OkGreen.copy(alpha = .18f) else MaterialTheme.colorScheme.onSurface.copy(alpha = .06f),
-                    modifier = Modifier.size(38.dp)) {
-                    Box(contentAlignment = Alignment.Center) { Text(if (voiceOn) "🔊" else "🔇", fontSize = 17.sp) }
-                }
-            }
-            // 점심 외출 표시
-            data.tracker?.outings?.filter { it.lunch }?.forEach { o ->
-                Text("점심 외출 ${o.from.toLocalTime().hhmm()}~${o.to.toLocalTime().hhmm()}" + (if (o.overMin > 0) " (${o.overMin}분 초과)" else ""),
-                    fontSize = 12.sp, color = if (o.overMin > 0) OtOrange else MaterialTheme.colorScheme.onSurface.copy(alpha = .6f),
-                    modifier = Modifier.padding(top = 2.dp))
-            }
-            data.tracker?.outsideSince?.let { os ->
-                if (hol == null && data.rec == null && c.inLunch(os.toLocalTime()))
-                    Text("점심 외출 중 (${os.toLocalTime().hhmm()}~)", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 2.dp))
-            }
-            if (hol == null && data.rec?.status != Status.ABSENT && data.rec?.status != Status.LEAVE && data.rec?.status != Status.HALF_LEAVE) {
-                val small = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
-                val bm = Modifier.height(34.dp)
-                val done = data.rec?.checkOut != null
-                Row(Modifier.padding(top = 10.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    if (!done) FilledTonalButton(onClick = {
-                        repo.saveDay(DayRecord(today, c.id, Status.WORK, hm(c.workStart), LocalTime.now().withSecond(0).withNano(0), Source.MANUAL, "수동 퇴근"))
-                        Scheduler.cancelPoll(ctx)
-                        Voice.checkout(ctx)
-                        bump()
-                    }, enabled = now.toLocalTime().isAfter(hm(c.workStart)), modifier = bm, contentPadding = small) { Text("지금 퇴근", fontSize = 13.sp) }
-                    OutlinedButton(onClick = {
-                        pickTime(ctx, data.rec?.checkOut ?: hm(c.workEnd)) { t ->
-                            repo.saveDay(DayRecord(today, c.id, Status.WORK, hm(c.workStart), t, Source.MANUAL, "수동 입력")); bump()
+                    Text(when (mainTab) {
+                        0 -> sub
+                        1 -> "주 한도 ${sm.weekLimitMin / 60}시간 중 ${(sm.weekMin * 100 / sm.weekLimitMin.coerceAtLeast(1))}% 사용"
+                        else -> "출근 ${sm.attendedDays}/${sm.workdaysSoFar}일 · ${if (data.pay.bonus > 0) "만근 예정" else data.pay.bonusStatus}"
+                    }, fontSize = 12.sp, color = Color.White.copy(alpha = .6f), maxLines = 2, modifier = Modifier.padding(top = 8.dp))
+                    // 점심 외출 표시
+                    if (mainTab == 0) {
+                        data.tracker?.outings?.filter { it.lunch }?.forEach { o ->
+                            Text("점심 외출 ${o.from.toLocalTime().hhmm()}~${o.to.toLocalTime().hhmm()}" + (if (o.overMin > 0) " (${o.overMin}분 초과)" else ""),
+                                fontSize = 12.sp, color = if (o.overMin > 0) Color(0xFFFFB86B) else Color.White.copy(alpha = .6f))
                         }
-                    }, modifier = bm, contentPadding = small) { Text(if (done) "시각 수정" else "퇴근시각", fontSize = 13.sp) }
-                    // 퇴근이 잘못 잡혔을 때: 지우고 지금부터 다시 감지
-                    if (done && data.rec?.status == Status.WORK && !field)
-                        TextButton(onClick = { Engine.resumeWork(ctx); Tracker.oneShot(ctx) { bump() }; bump() }, modifier = bm, contentPadding = small) {
-                            Text("퇴근 취소", fontSize = 13.sp)
+                        data.tracker?.outsideSince?.let { os ->
+                            if (hol == null && data.rec == null && c.inLunch(os.toLocalTime()))
+                                Text("점심 외출 중 (${os.toLocalTime().hhmm()}~)", fontSize = 12.sp, color = Color(0xFF8FE3B5))
                         }
-                    // 외근: 그날은 위치로 판정하지 않음
-                    if (field) TextButton(onClick = { Engine.setFieldWork(ctx, false); bump() }, modifier = bm, contentPadding = small) {
-                        Text("외근 취소", fontSize = 13.sp)
-                    } else if (data.rec == null) TextButton(onClick = { Engine.setFieldWork(ctx, true); bump() }, modifier = bm, contentPadding = small) {
-                        Text("오늘 외근", fontSize = 13.sp)
+                    }
+                }
+                // 오른쪽 흰 상자: 핵심 숫자
+                Column(Modifier.padding(start = 10.dp).size(112.dp).background(Color.White, androidx.compose.foundation.shape.RoundedCornerShape(18.dp)).padding(10.dp),
+                    verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+                    val (k, v, w) = when (mainTab) {
+                        0 -> Triple("오늘 연장", hmShort(sm.todayMin), won(sm.todayPay))
+                        1 -> Triple("이번 주", hmShort(sm.weekMin), won(sm.weekPay))
+                        else -> Triple("예상 실수령", "%,d".format(data.pay.net / 10000) + "만", won(sm.monthPay) + " 연장")
+                    }
+                    Text(k, fontSize = 11.sp, color = Color(0xFF6B7280))
+                    Text(v, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF111827), maxLines = 1, modifier = Modifier.padding(vertical = 2.dp))
+                    Text(w, fontSize = 11.sp, color = HomeGreen, maxLines = 1)
+                }
+            }
+            // 알약 버튼 (네이버페이 '카드 변경하기' 자리)
+            if (mainTab == 0 && canAct) Row(Modifier.padding(horizontal = 18.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                PillButton(if (done) "퇴근 시각 수정" else "지금 퇴근", Modifier.weight(1f), enabled = done || now.toLocalTime().isAfter(hm(c.workStart))) {
+                    if (done) pickCheckout() else checkoutNow()
+                }
+                if (!done) PillButton("퇴근 시각", Modifier.weight(1f)) { pickCheckout() }
+                else if (data.rec?.status == Status.WORK && !field) PillButton("퇴근 취소", Modifier.weight(1f)) { Engine.resumeWork(ctx); Tracker.oneShot(ctx) { bump() }; bump() }
+            } else if (mainTab != 0) Row(Modifier.padding(horizontal = 18.dp, vertical = 4.dp)) {
+                PillButton("근무기록 보기", Modifier.fillMaxWidth()) { goRecords() }
+            }
+        }
+
+        // ── 아이콘 바로가기 (5×2)
+        SCard(pad = 14.dp) {
+            val items = listOf(
+                Triple("📅", "근무기록", goRecords), Triple("💰", "급여", goPay), Triple("💳", "카드", goCard),
+                Triple("🌴", "연차", goRecords), Triple("🎡", "점심 룰렛", goFun),
+                Triple("⏱", "퇴근 시각", { if (canAct) pickCheckout() }),
+                Triple("↩️", "퇴근 취소", { if (done && !field) { Engine.resumeWork(ctx); Tracker.oneShot(ctx) { bump() }; bump() } }),
+                Triple("🚗", if (field) "외근 취소" else "오늘 외근", { if (field) { Engine.setFieldWork(ctx, false); bump() } else if (data.rec == null && hol == null) { Engine.setFieldWork(ctx, true); bump() } }),
+                Triple("📍", "위치 확인", { Tracker.oneShot(ctx) { bump() }; bump() }),
+                Triple("⚙️", "설정", goSettings))
+            items.chunked(5).forEach { row ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    row.forEach { (ic, label, act) ->
+                        Column(Modifier.weight(1f).clickable { act() }.padding(vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Box(Modifier.size(44.dp).background(MaterialTheme.colorScheme.onSurface.copy(alpha = .05f), androidx.compose.foundation.shape.RoundedCornerShape(14.dp)),
+                                contentAlignment = Alignment.Center) { Text(ic, fontSize = 22.sp) }
+                            Text(label, fontSize = 12.sp, maxLines = 1, modifier = Modifier.padding(top = 6.dp))
+                        }
                     }
                 }
             }
         }
 
-        // ── 추가근무
-        val sm = data.sum
-        SCard {
-            CardTitle("추가 근무", trailing = { Tag("시급 ${"%,d".format(data.s.hourly(c, today.year).toInt())}원 × ${c.overtimeRate}", OkGreen) })
-            Row(Modifier.fillMaxWidth()) {
-                OtTile("오늘", sm.todayMin, sm.todayPay, Modifier.weight(1f))
-                OtTile("이번 주", sm.weekMin, sm.weekPay, Modifier.weight(1f))
-                OtTile(if (c.periodStartDay <= 1) "이번 달" else "이번 기간", sm.monthMin, sm.monthPay, Modifier.weight(1f))
+        // ── 한눈에 (가로로 넘기는 색 카드)
+        Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 20.dp, top = 12.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("한눈에 보기", fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Text("급여 ›", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f), modifier = Modifier.clickable(onClick = goPay))
+        }
+        val np = data.nextPay
+        val dday = ChronoUnit.DAYS.between(today, np.payDate)
+        val lv = data.leave
+        val glance = listOfNotNull(
+            Triple("💵", if (dday == 0L) "오늘 급여일!" else "급여일 D-$dday", "${np.payDate.monthValue}/${np.payDate.dayOfMonth} · 예상 ${won(data.nextPayslip.net)}") to goPay,
+            Triple("⏱", "이번 주 연장 ${hmShort(sm.weekMin)}", "+${won(sm.weekPay)}") to goRecords,
+            Triple("📈", "이번 달 연장 ${hmShort(sm.monthMin)}", "+${won(sm.monthPay)}") to goRecords,
+            data.cardTotal?.let { Triple("💳", "카드 ${won(it.toInt())}", data.cardLabel) to goCard },
+            Triple("🌴", "남은 연차 ${days(lv.remaining)}", "사용 ${days(lv.used)} / 전체 ${days(lv.total)}") to goRecords,
+            Triple("🏅", if (data.pay.bonus > 0) "만근 예정" else "만근 ${data.pay.bonusStatus}", "출근 ${sm.attendedDays}/${sm.workdaysSoFar}일") to goRecords)
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            glance.forEachIndexed { i, (t, act) ->
+                val col = listOf(Color(0xFF14B866), Color(0xFF0FA968), Color(0xFF2E9E6B), Color(0xFF1C8C7A), Color(0xFF3A9D4F), Color(0xFF4B8F3C))[i % 6]
+                Column(Modifier.width(168.dp).height(108.dp).background(col, androidx.compose.foundation.shape.RoundedCornerShape(20.dp))
+                    .clickable { act() }.padding(14.dp), verticalArrangement = Arrangement.SpaceBetween) {
+                    Box(Modifier.size(32.dp).background(Color.White.copy(alpha = .9f), androidx.compose.foundation.shape.CircleShape), contentAlignment = Alignment.Center) {
+                        Text(t.first, fontSize = 16.sp)
+                    }
+                    Column {
+                        Text(t.second, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1)
+                        Text(t.third, fontSize = 12.sp, color = Color.White.copy(alpha = .85f), maxLines = 1)
+                    }
+                }
             }
-            val ratio = (sm.weekMin.toFloat() / sm.weekLimitMin).coerceIn(0f, 1f)
-            Spacer(Modifier.height(16.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("주 연장 한도", fontSize = 13.sp, modifier = Modifier.weight(1f))
-                Text("${hmShort(sm.weekMin)} / ${sm.weekLimitMin / 60}시간", fontSize = 13.sp,
-                    color = if (ratio >= .85f) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
-            }
-            LinearProgressIndicator(progress = { ratio }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-                color = if (ratio >= .85f) MaterialTheme.colorScheme.error else OtOrange)
-            if (data.live > 0) Text("※ 오늘 값은 퇴근 전 실시간 추정치예요", fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp),
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
         }
 
         // ── 만근
@@ -244,18 +331,7 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
                 fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
         }
 
-        // ── 다음 급여일
-        SCard {
-            val np = data.nextPay
-            val dday = ChronoUnit.DAYS.between(today, np.payDate)
-            CardTitle("다음 급여일", trailing = { Tag(if (dday == 0L) "오늘!" else "D-$dday", if (dday <= 3) OkGreen else MaterialTheme.colorScheme.primary) })
-            Text("${np.payDate.monthValue}월 ${np.payDate.dayOfMonth}일 (${wd(np.payDate)})", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Text("${np.label.monthValue}월분 (${np.rangeText()}) · 예상 실수령 ${won(data.nextPayslip.net)}", fontSize = 14.sp,
-                modifier = Modifier.padding(top = 4.dp))
-        }
-
         // ── 연차
-        val lv = data.leave
         SCard(onClick = goRecords) {
             CardTitle("연차", trailing = {
                 Tag(if (lv.auto) "자동 계산" else "직접 입력", MaterialTheme.colorScheme.primary)
@@ -277,7 +353,8 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
 
 data class HomeData(val c: Company, val s: AppSettings, val rec: DayRecord?, val tracker: GeofenceTracker?,
                     val live: Int, val sum: OtSummary, val pay: Payslip, val needCheck: List<DayRecord>,
-                    val period: PayPeriod, val nextPay: PayPeriod, val nextPayslip: Payslip, val leave: LeaveSummary)
+                    val period: PayPeriod, val nextPay: PayPeriod, val nextPayslip: Payslip, val leave: LeaveSummary,
+                    val cardTotal: Long? = null, val cardLabel: String = "")
 
 fun days(v: Double): String = if (v % 1.0 == 0.0) "${v.toInt()}일" else "${"%.1f".format(v)}일"
 
@@ -330,3 +407,30 @@ private fun todayStatus(c: Company, d: HomeData, hol: String?, now: LocalDateTim
     }
 }
 
+
+private val HomeGreen = Color(0xFF03C75A)
+
+private fun greeting(now: LocalDateTime): String = when (now.hour) {
+    in 4..8 -> "좋은 아침이에요 ☀️"
+    in 9..11 -> "오늘도 힘내세요 💪"
+    in 12..13 -> "점심 맛있게 드세요 🍚"
+    in 14..17 -> "조금만 더 힘내요!"
+    in 18..21 -> "오늘도 수고 많으셨어요 🌙"
+    else -> "편안한 밤 되세요 ✨"
+}
+
+@Composable
+private fun IconCircle(icon: String, bg: Color, onClick: () -> Unit) {
+    Box(Modifier.padding(start = 6.dp).size(40.dp).background(bg, androidx.compose.foundation.shape.CircleShape).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center) { Text(icon, fontSize = 18.sp) }
+}
+
+/** 진한 카드 위의 알약 모양 버튼 */
+@Composable
+private fun PillButton(text: String, modifier: Modifier = Modifier, enabled: Boolean = true, onClick: () -> Unit) {
+    Box(modifier.height(44.dp)
+        .border(1.dp, Color.White.copy(alpha = if (enabled) .35f else .15f), androidx.compose.foundation.shape.RoundedCornerShape(50))
+        .clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) {
+        Text(text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color.White.copy(alpha = if (enabled) 1f else .4f))
+    }
+}

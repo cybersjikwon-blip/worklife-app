@@ -125,34 +125,61 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
             }
         }
 
-        // ── 기간: 언제부터 합산할지
+        // ── 기간: 언제부터 합산할지 (공통 / 카드마다 따로)
         SCard {
             CardTitle("언제부터 합산할까요?", trailing = { if (people.any { it.ownPeriod }) Tag("카드별 기간 있음", OkGreen) })
+            // 카드 고르기: [공통] [내 BC] [법인 BC] … → 고른 카드의 기간을 아래에서 바꿈
+            var sel by remember { mutableIntStateOf(-1) }
+            if (sel >= people.size) sel = -1
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf("month" to "이번 달", "last" to "지난 달", "cycle" to "카드 이용기간", "custom" to "직접 지정").forEach { (k, l) ->
-                    FilterChip(period.mode == k, {
-                        repo.cardPeriod = if (k == "custom" && period.customStart == null) period.copy(mode = k, customStart = from) else period.copy(mode = k)
-                        refresh()
-                    }, label = { Text(l) })
-                }
+                FilterChip(sel == -1, { sel = -1 }, label = { Text("공통") })
+                people.forEachIndexed { i, p -> FilterChip(sel == i, { sel = i }, label = { Text(p.name + if (p.ownPeriod) " •" else "") }) }
+                if (people.isEmpty()) AssistChip(onClick = { editPeople = true }, label = { Text("+ 카드 등록") })
             }
-            when (period.mode) {
-                "cycle" -> Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("이용기간 시작일: 매월", fontSize = 14.sp, modifier = Modifier.weight(1f))
-                    OutlinedButton(onClick = { repo.cardPeriod = period.copy(cycleStartDay = (period.cycleStartDay - 1).let { if (it < 1) 28 else it }); refresh() }) { Text("−") }
-                    Text("${period.cycleStartDay}일", fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 10.dp))
-                    OutlinedButton(onClick = { repo.cardPeriod = period.copy(cycleStartDay = (period.cycleStartDay % 28) + 1); refresh() }) { Text("+") }
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            fun dLabel(d: LocalDate) = "${d.year % 100}.${d.monthValue}.${d.dayOfMonth}"
+            if (sel == -1) {
+                Text("등록 카드 중 따로 정하지 않은 카드·미지정 결제에 적용", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+                Row(Modifier.padding(top = 6.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("month" to "이번 달", "last" to "지난 달", "cycle" to "카드 이용기간", "custom" to "직접 지정").forEach { (k, l) ->
+                        FilterChip(period.mode == k, {
+                            repo.cardPeriod = if (k == "custom" && period.customStart == null) period.copy(mode = k, customStart = from) else period.copy(mode = k)
+                            refresh()
+                        }, label = { Text(l) })
+                    }
                 }
-                "custom" -> Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { pickDate(ctx, period.customStart ?: from) { d -> repo.cardPeriod = period.copy(customStart = d); refresh() } },
-                        Modifier.weight(1f)) { Text("시작 ${(period.customStart ?: from).let { "${it.year % 100}.${it.monthValue}.${it.dayOfMonth}" }}") }
-                    OutlinedButton(onClick = { pickDate(ctx, period.customEnd ?: today) { d -> repo.cardPeriod = period.copy(customEnd = d); refresh() } },
-                        Modifier.weight(1f)) { Text(period.customEnd?.let { "끝 ${it.year % 100}.${it.monthValue}.${it.dayOfMonth}" } ?: "끝 오늘까지") }
+                when (period.mode) {
+                    "cycle" -> CycleRow(period.cycleStartDay, onDay = { d -> repo.cardPeriod = period.copy(cycleStartDay = d); refresh() })
+                    "custom" -> Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { pickDate(ctx, period.customStart ?: from) { d -> repo.cardPeriod = period.copy(customStart = d); refresh() } },
+                            Modifier.weight(1f)) { Text("📅 시작 ${dLabel(period.customStart ?: from)}") }
+                        OutlinedButton(onClick = { pickDate(ctx, period.customEnd ?: today) { d -> repo.cardPeriod = period.copy(customEnd = d); refresh() } },
+                            Modifier.weight(1f)) { Text(period.customEnd?.let { "📅 끝 ${dLabel(it)}" } ?: "📅 끝 오늘까지") }
+                    }
                 }
+                if (period.mode == "custom" && period.customEnd != null)
+                    TextButton(onClick = { repo.cardPeriod = period.copy(customEnd = null); refresh() }, contentPadding = PaddingValues(0.dp)) { Text("끝을 '오늘까지'로", fontSize = 13.sp) }
+                Text("→ ${rangeText(from to to)} 합산", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 6.dp))
+            } else {
+                val p = people[sel]
+                fun save(np: CardPerson) { repo.cardPeople = people.mapIndexed { j, q -> if (j == sel) np else q }; refresh() }
+                val mode = when { p.start != null -> "custom"; p.cycleDay in 1..28 -> "cycle"; else -> "common" }
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(mode == "common", { save(p.copy(cycleDay = 0, start = null)) }, label = { Text("공통 따름") })
+                    FilterChip(mode == "cycle", { save(p.copy(cycleDay = if (p.cycleDay in 1..28) p.cycleDay else 1, start = null)) }, label = { Text("카드 이용기간") })
+                    FilterChip(mode == "custom", { save(p.copy(start = p.start ?: from)) }, label = { Text("직접 지정") })
+                }
+                when (mode) {
+                    "cycle" -> CycleRow(p.cycleDay, onDay = { d -> save(p.copy(cycleDay = d, start = null)) })
+                    "custom" -> OutlinedButton(onClick = { pickDate(ctx, p.start ?: from) { d -> save(p.copy(start = d)) } }, Modifier.padding(top = 8.dp)) {
+                        Text("📅 시작 ${dLabel(p.start ?: from)} ~ 오늘")
+                    }
+                    else -> Text("공통 기간(${rangeText(from to to)})을 따라요", fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
+                }
+                Text("→ ${p.name}: ${rangeText(pRanges[sel])} 합산", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 6.dp))
             }
-            if (period.mode == "custom" && period.customEnd != null)
-                TextButton(onClick = { repo.cardPeriod = period.copy(customEnd = null); refresh() }, contentPadding = PaddingValues(0.dp)) { Text("끝을 '오늘까지'로", fontSize = 13.sp) }
-            Text("카드 이용기간은 카드 명세서의 '이용기간' 시작일(예: 매월 1일, 14일)을 넣으면 결제될 금액과 맞춰져요. 앱 설치 전 문자도 문자함에 남아 있으면 아래 [문자함에서 불러오기]로 채워져요.",
+            Text("카드 이용기간은 카드 명세서의 '이용기간' 시작일이에요(예: 매월 1일, 14일). 날짜를 누르면 달력에서 고를 수 있어요. 카드마다 다르면 위에서 카드를 골라 따로 정하세요.",
                 fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f), modifier = Modifier.padding(top = 8.dp))
         }
 
@@ -465,4 +492,20 @@ private fun PasteDialog(onDismiss: () -> Unit, onOk: (String) -> Unit) {
         },
         confirmButton = { TextButton(onClick = { onOk(t) }, enabled = t.isNotBlank()) { Text("가져오기") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } })
+}
+
+/** 이용기간 시작일: [−] [📅 매월 14일] [+] — 가운데를 누르면 달력에서 날짜를 골라 그 '일'로 설정 */
+@Composable
+private fun CycleRow(day: Int, onDay: (Int) -> Unit) {
+    val ctx = LocalContext.current
+    val d = day.coerceIn(1, 28)
+    Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("이용기간 시작", fontSize = 14.sp, modifier = Modifier.weight(1f))
+        OutlinedButton(onClick = { onDay(if (d <= 1) 28 else d - 1) }, contentPadding = PaddingValues(horizontal = 10.dp)) { Text("−") }
+        OutlinedButton(onClick = {
+            val today = LocalDate.now()
+            pickDate(ctx, today.withDayOfMonth(d)) { picked -> onDay(picked.dayOfMonth.coerceIn(1, 28)) }
+        }, Modifier.padding(horizontal = 6.dp)) { Text("📅 매월 ${d}일", fontWeight = FontWeight.Bold) }
+        OutlinedButton(onClick = { onDay(d % 28 + 1) }, contentPadding = PaddingValues(horizontal = 10.dp)) { Text("+") }
+    }
 }

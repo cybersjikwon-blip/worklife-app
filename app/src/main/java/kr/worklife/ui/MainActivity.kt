@@ -172,7 +172,7 @@ fun AppRoot(version: Int, tab: Int, setTab: (Int) -> Unit, bump: () -> Unit) {
         val m = Modifier.padding(pad)
         when (tab) {
             0 -> HomeScreen(version, bump, m, goSettings = { armed = false; setTab(5) }, goRecords = { armed = false; setTab(1) },
-                goFun = { armed = false; setTab(4) })
+                goFun = { armed = false; setTab(4) }, goPay = { armed = false; setTab(2) }, goCard = { armed = false; setTab(3) })
             1 -> RecordsScreen(version, bump, month, { month = it }, m)
             2 -> PayScreen(version, bump, month, { month = it }, m)
             3 -> CardScreen(version, bump, m)

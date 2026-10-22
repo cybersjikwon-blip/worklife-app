@@ -40,6 +40,7 @@ fun SettingsScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
         CompanyHistoryCard(companies, company, onEdit = { editId = it }, bump = bump, onNew = { editId = it })
 
         key(version) { PersonalForm(bump) }
+        VoiceCard()
         WidgetCard()
         UpdateCard(version, bump)
         PermissionCard(version, bump)
@@ -53,6 +54,22 @@ fun SettingsScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
         Spacer(Modifier.height(24.dp))
     }
 
+}
+
+/** 퇴근 음성: 켜기 / 진동 모드에서도 재생 / 테스트 */
+@Composable
+private fun VoiceCard() {
+    val ctx = LocalContext.current
+    var on by remember { mutableStateOf(kr.worklife.bg.Voice.isOn(ctx)) }
+    var quiet by remember { mutableStateOf(kr.worklife.bg.Voice.inQuiet(ctx)) }
+    SCard {
+        CardTitle("퇴근 음성 🔊")
+        SwitchRow("퇴근할 때 '퇴근합니다' 재생", on) { on = it; kr.worklife.bg.Voice.set(ctx, it) }
+        SwitchRow("진동 모드에서도 재생", quiet) { quiet = it; kr.worklife.bg.Voice.setInQuiet(ctx, it) }
+        OutlinedButton(onClick = { kr.worklife.bg.Voice.test(ctx) }) { Text("▶ 지금 들어보기") }
+        Text("미디어 볼륨으로 나와요. 안 들리면 볼륨을 올려 주세요. 재생했는지(또는 왜 안 했는지)는 근무기록 > 날짜 > '기록 이력'에 남아요.",
+            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f), modifier = Modifier.padding(top = 6.dp))
+    }
 }
 
 /** 큰 위젯(4×2) 맨 아랫줄에 무엇을 보여줄지 */
