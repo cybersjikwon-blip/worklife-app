@@ -26,8 +26,12 @@ data class CardTx(
     val raw: String = "",
     val excluded: Boolean = false,
     val person: Int = -1,           // 직접 지정한 사람 (-1 = 자동 매칭)
+    val memo: String = "",          // 어디에 썼는지 메모 (2만원 이상은 메모 칸을 눈에 띄게)
 ) {
     val isCancel get() = amount < 0
+    /** 메모를 권하는 결제: 2만원 이상 승인 */
+    val needsMemo get() = amount >= MEMO_MIN
+    companion object { const val MEMO_MIN = 20_000L }
 }
 
 /** 합산할 사람 (최대 5명). 카드 끝자리·전화번호·이름 중 하나라도 맞으면 그 사람 */

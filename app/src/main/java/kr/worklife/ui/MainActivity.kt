@@ -43,6 +43,7 @@ class MainActivity : ComponentActivity() {
     val tab = mutableIntStateOf(0)
     private val ready = mutableStateOf(false)
     private var stoppedAt = 0L
+    private var forcedTabAt = 0L // 알림·공유로 특정 탭을 열 때 (다시 시작될 때 홈으로 돌리지 않게)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -50,6 +51,7 @@ class MainActivity : ComponentActivity() {
         Notif.init(this)
         tab.intValue = 0
         handleShare(intent)
+        handleOpen(intent)
         setContent {
             WorkTheme {
                 if (!ready.value) SplashScreen()
@@ -93,6 +95,16 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         tab.intValue = 0 // 아이콘·알림으로 다시 열면 홈
         handleShare(intent)
+        handleOpen(intent)
+    }
+
+    /** 알림에서 '눌러서 메모' → 카드 탭 + 그 결제 메모 창 */
+    private fun handleOpen(i: Intent?) {
+        val t = i?.getIntExtra("openTab", -1) ?: -1
+        if (t < 0) return
+        CardShare.memoTx = i?.getLongExtra("memoTx", -1L) ?: -1L
+        tab.intValue = t; forcedTabAt = System.currentTimeMillis()
+        version.intValue++
     }
 
     /** 문자앱 [공유] → 카드 탭으로 */
@@ -108,7 +120,7 @@ class MainActivity : ComponentActivity() {
         val t = i.getStringExtra(Intent.EXTRA_TEXT)
         if (imgs.isEmpty() && t.isNullOrBlank()) return
         if (imgs.isNotEmpty()) CardShare.putImages(imgs) else CardShare.put(t!!)
-        tab.intValue = 3
+        tab.intValue = 3; forcedTabAt = System.currentTimeMillis()
         version.intValue++
     }
 
@@ -121,7 +133,7 @@ class MainActivity : ComponentActivity() {
     override fun onRestart() {
         super.onRestart()
         // 1분 이상 다른 앱에 있다가 돌아오면 홈 (권한 설정 화면 잠깐 다녀온 건 유지)
-        if (System.currentTimeMillis() - stoppedAt > 60_000) tab.intValue = 0
+        if (System.currentTimeMillis() - stoppedAt > 60_000 && System.currentTimeMillis() - forcedTabAt > 3_000) tab.intValue = 0
     }
 
     /** 앱이 보일 때마다: 지난 날 마감 → 오늘 판정 → 알람·지오펜스 재등록 → 필요하면 감지 시작 */
@@ -154,8 +166,9 @@ fun SplashScreen() {
 @Composable
 fun AppRoot(version: Int, tab: Int, setTab: (Int) -> Unit, bump: () -> Unit) {
     var month by remember { mutableStateOf(YearMonth.now()) }
+    var openApp by remember { mutableStateOf<String?>(null) } // '앱' 탭에서 열린 미니앱
     val tabs = listOf("홈" to Icons.Filled.Home, "근무기록" to Icons.Filled.DateRange,
-        "급여" to Icons.Filled.List, "카드" to Icons.Filled.ShoppingCart, "재미" to Icons.Filled.Star, "설정" to Icons.Filled.Settings)
+        "급여" to Icons.Filled.List, "카드" to Icons.Filled.ShoppingCart, "앱" to Icons.Filled.Star, "설정" to Icons.Filled.Settings)
     // 뒤로가기 상태: 홈에서 한 번 누르면 '대기', 대기 중 한 번 더 누르면 종료 (메시지 없음)
     var armed by remember { mutableStateOf(false) }
     Scaffold(
@@ -172,11 +185,11 @@ fun AppRoot(version: Int, tab: Int, setTab: (Int) -> Unit, bump: () -> Unit) {
         val m = Modifier.padding(pad)
         when (tab) {
             0 -> HomeScreen(version, bump, m, goSettings = { armed = false; setTab(5) }, goRecords = { armed = false; setTab(1) },
-                goFun = { armed = false; setTab(4) }, goPay = { armed = false; setTab(2) }, goCard = { armed = false; setTab(3) })
+                goFun = { armed = false; openApp = "lunch"; setTab(4) }, goPay = { armed = false; setTab(2) }, goCard = { armed = false; setTab(3) })
             1 -> RecordsScreen(version, bump, month, { month = it }, m)
             2 -> PayScreen(version, bump, month, { month = it }, m)
             3 -> CardScreen(version, bump, m)
-            4 -> FunScreen(m)
+            4 -> AppsScreen(m, openApp) { openApp = it }
             else -> SettingsScreen(version, bump, m)
         }
     }
@@ -190,6 +203,7 @@ fun AppRoot(version: Int, tab: Int, setTab: (Int) -> Unit, bump: () -> Unit) {
     BackHandler(enabled = true) {
         val nowMs = System.currentTimeMillis()
         when {
+            tab == 4 && openApp != null -> openApp = null // 미니앱 → 앱 목록
             armed && nowMs - armedAt <= 2000 && tab == 0 -> { toast?.cancel(); act?.finish() }
             else -> {
                 if (tab != 0) setTab(0) // 다른 메뉴 → 홈으로 가면서 안내 (2초 안에 한 번 더 누르면 종료)

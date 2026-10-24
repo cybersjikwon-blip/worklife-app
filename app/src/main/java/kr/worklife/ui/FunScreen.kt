@@ -55,10 +55,11 @@ fun share(ctx: Context, text: String) {
 }
 
 @Composable
-fun FunScreen(modifier: Modifier) {
-    var sub by rememberSaveable { mutableIntStateOf(0) }
+fun FunScreen(modifier: Modifier, initial: Int = 0, onBack: (() -> Unit)? = null) {
+    var sub by rememberSaveable(initial) { mutableIntStateOf(initial) }
     Column(modifier.fillMaxSize()) {
-        BigHeader("재미", "점심 메뉴도, 커피 내기도 공정하게")
+        if (onBack != null) MiniAppHeader("재미", "🎡", onBack)
+        else BigHeader("재미", "점심 메뉴도, 커피 내기도 공정하게")
         TabRow(selectedTabIndex = sub, containerColor = MaterialTheme.colorScheme.background) {
             listOf("점심 룰렛", "돌림판", "사다리").forEachIndexed { i, t ->
                 Tab(selected = sub == i, onClick = { sub = i }, text = { Text(t) })

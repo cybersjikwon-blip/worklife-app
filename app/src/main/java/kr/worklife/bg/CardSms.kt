@@ -29,8 +29,9 @@ object CardIngest {
     fun ingestWithResult(ctx: Context, sender: String, body: String, at: LocalDateTime, source: String, notify: Boolean = false): String {
         val repo = Repo.get(ctx)
         val tx = CardParser.parse(sender, body, at, repo.cardKeywords, source) ?: return "카드 승인 아님"
-        if (!repo.addCardTx(tx)) return "이미 있음"
-        if (notify) runCatching { notifyAdded(ctx, tx) }
+        val id = repo.addCardTxId(tx)
+        if (id < 0) return "이미 있음"
+        if (notify) runCatching { notifyAdded(ctx, tx.copy(id = id)) }
         return "추가"
     }
 
@@ -48,7 +49,10 @@ object CardIngest {
         val amt = "%,d원".format(kotlin.math.abs(tx.amount))
         val title = if (tx.isCancel) "💳 $who $amt 취소 반영" else "💳 $who $amt 집계"
         val cardSum = if (i >= 0) " · ${ppl[i].name} ${"%,d원".format(sm.perPerson[i].first)}" else ""
-        Notif.cardAdded(ctx, title, (tx.merchant.ifBlank { "" }.let { if (it.isNotEmpty()) "$it · " else "" }) + "누적 ${"%,d원".format(sm.total)}$cardSum")
+        val text = (tx.merchant.ifBlank { "" }.let { if (it.isNotEmpty()) "$it · " else "" }) + "누적 ${"%,d원".format(sm.total)}$cardSum"
+        // 2만원 이상: 눌러서 바로 메모 (조금 더 오래 보여줌)
+        if (tx.needsMemo) Notif.cardAdded(ctx, "$title · ✏️ 눌러서 메모", text, memoTxId = tx.id)
+        else Notif.cardAdded(ctx, title, text)
     }
 
     // ───────── 진단: 알림 연결 상태와 최근 받은 카드 관련 알림 (기기 안에만 보관) ─────────

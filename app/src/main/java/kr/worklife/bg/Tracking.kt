@@ -59,7 +59,7 @@ object Notif {
 
     /** 카드 승인 집계 알림: 짧은 진동 + 약 5초 뒤 자동으로 사라짐 */
     @SuppressLint("MissingPermission")
-    fun cardAdded(ctx: Context, title: String, text: String) {
+    fun cardAdded(ctx: Context, title: String, text: String, memoTxId: Long = -1) {
         init(ctx)
         vibrateShort(ctx)
         val nm = NotificationManagerCompat.from(ctx)
@@ -68,7 +68,11 @@ object Notif {
             nm.notify(40, NotificationCompat.Builder(ctx, CH_CARD).setSmallIcon(R.drawable.ic_stat)
                 .setContentTitle(title).setContentText(text).setSilent(true)
                 .setPriority(NotificationCompat.PRIORITY_HIGH).setCategory(NotificationCompat.CATEGORY_STATUS)
-                .setTimeoutAfter(5_000).setAutoCancel(true).setContentIntent(openApp(ctx)).build())
+                .setTimeoutAfter(if (memoTxId > 0) 12_000 else 5_000).setAutoCancel(true)
+                .setContentIntent(if (memoTxId > 0) PendingIntent.getActivity(ctx, 41,
+                    Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                        .putExtra("openTab", 3).putExtra("memoTx", memoTxId),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE) else openApp(ctx)).build())
         } catch (_: SecurityException) { }
     }
 

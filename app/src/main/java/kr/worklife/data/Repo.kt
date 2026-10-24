@@ -16,7 +16,7 @@ import java.time.YearMonth
 data class PayHistory(val ym: YearMonth, val companyId: Long, val companyName: String,
                       val gross: Int, val deduct: Int, val net: Int, val kind: String, val lines: List<PayLine>)
 
-class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.db", null, 4) {
+class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.db", null, 5) {
     private val prefs = ctx.getSharedPreferences("worklife", Context.MODE_PRIVATE)
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -25,10 +25,16 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
         db.execSQL("CREATE INDEX idx_locs ON locs(ts)")
         db.execSQL("CREATE TABLE payslips(ym TEXT, company INTEGER, json TEXT, kind TEXT, saved_at TEXT, PRIMARY KEY(ym, company))")
         createCards(db)
+        createLotto(db)
+    }
+
+    private fun createLotto(db: SQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS lotto_draws(round INTEGER PRIMARY KEY, date TEXT, nums TEXT, bonus INTEGER, prize INTEGER, winners INTEGER)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS lotto_my(id INTEGER PRIMARY KEY AUTOINCREMENT, round INTEGER, nums TEXT, created TEXT, src TEXT)")
     }
 
     private fun createCards(db: SQLiteDatabase) {
-        db.execSQL("CREATE TABLE cards(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, amount INTEGER, merchant TEXT, card TEXT, sender TEXT, name TEXT, inst INTEGER, foreign_amt TEXT, bc INTEGER, source TEXT, raw TEXT, excluded INTEGER DEFAULT 0, person INTEGER DEFAULT -1)")
+        db.execSQL("CREATE TABLE cards(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, amount INTEGER, merchant TEXT, card TEXT, sender TEXT, name TEXT, inst INTEGER, foreign_amt TEXT, bc INTEGER, source TEXT, raw TEXT, excluded INTEGER DEFAULT 0, person INTEGER DEFAULT -1, memo TEXT)")
         db.execSQL("CREATE INDEX idx_cards ON cards(ts)")
     }
 
@@ -39,6 +45,8 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
         if (o < 3) runCatching { db.execSQL("ALTER TABLE days ADD COLUMN lov INTEGER DEFAULT 0") }
         // v4: 카드 사용 내역
         if (o < 4) runCatching { createCards(db) }
+        // v5: 카드 메모 + 로또
+        if (o < 5) { runCatching { db.execSQL("ALTER TABLE cards ADD COLUMN memo TEXT") }; runCatching { createLotto(db) } }
     }
 
     // ───────── 설정 ─────────
@@ -268,16 +276,19 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
         put("ts", t.ts.withSecond(0).withNano(0).toString()); put("amount", t.amount); put("merchant", t.merchant); put("card", t.card)
         put("sender", t.sender); put("name", t.name); put("inst", t.installment); put("foreign_amt", t.foreign); put("bc", if (t.isBc) 1 else 0)
         put("source", t.source); put("raw", t.raw); put("excluded", if (t.excluded) 1 else 0); put("person", t.person)
+        put("memo", t.memo)
     }
 
     /** 새 내역 저장. 이미 있는 결제(문자+알림톡 중복 등)면 저장 안 하고 false */
+    fun addCardTx(t: CardTx): Boolean = addCardTxId(t) >= 0
+
+    /** 새 내역 저장 → 저장된 id (이미 있으면 -1) */
     @Synchronized
-    fun addCardTx(t: CardTx): Boolean {
+    fun addCardTxId(t: CardTx): Long {
         val day = t.ts.toLocalDate()
         val near = cardTxs("ts >= ? AND ts < ?", arrayOf(day.minusDays(if (t.ts.hour == 0) 1 else 0).atStartOfDay().toString(), day.plusDays(1).atStartOfDay().plusMinutes(5).toString()))
-        if (near.any { sameCardTx(it, t) || (it.raw.isNotEmpty() && it.raw == t.raw && it.ts == t.ts.withSecond(0).withNano(0)) }) return false
-        writableDatabase.insert("cards", null, txValues(t))
-        return true
+        if (near.any { sameCardTx(it, t) || (it.raw.isNotEmpty() && it.raw == t.raw && it.ts == t.ts.withSecond(0).withNano(0)) }) return -1
+        return writableDatabase.insert("cards", null, txValues(t))
     }
 
     fun updateCardTx(t: CardTx) { writableDatabase.update("cards", txValues(t), "id=?", arrayOf(t.id.toString())) }
@@ -296,10 +307,50 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
                 while (c.moveToNext()) runCatching {
                     add(CardTx(int("id"), LocalDateTime.parse(str("ts")), int("amount"), str("merchant"), str("card"), str("sender"), str("name"),
                         int("inst").toInt(), str("foreign_amt"), int("bc") == 1L, str("source").ifEmpty { "sms" }, str("raw"),
-                        int("excluded") == 1L, c.getColumnIndex("person").let { if (it < 0 || c.isNull(it)) -1 else c.getInt(it) }))
+                        int("excluded") == 1L, c.getColumnIndex("person").let { if (it < 0 || c.isNull(it)) -1 else c.getInt(it) }, str("memo")))
                 }
             }
         }
+
+    // ───────── 로또 ─────────
+    fun saveDraw(d: LottoDraw) {
+        writableDatabase.insertWithOnConflict("lotto_draws", null, ContentValues().apply {
+            put("round", d.round); put("date", d.date.toString()); put("nums", d.nums.joinToString(",")); put("bonus", d.bonus)
+            put("prize", d.firstPrize); put("winners", d.firstWinners)
+        }, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun draws(): List<LottoDraw> = readableDatabase.rawQuery("SELECT round, date, nums, bonus, prize, winners FROM lotto_draws ORDER BY round DESC", null).use { c ->
+        buildList { while (c.moveToNext()) runCatching {
+            add(LottoDraw(c.getInt(0), LocalDate.parse(c.getString(1)), c.getString(2).split(",").map { it.toInt() }, c.getInt(3), c.getLong(4), c.getInt(5)))
+        } }
+    }
+
+    fun drawRounds(): Set<Int> = readableDatabase.rawQuery("SELECT round FROM lotto_draws", null).use { c -> buildSet { while (c.moveToNext()) add(c.getInt(0)) } }
+
+    data class MyLotto(val id: Long, val round: Int, val nums: List<Int>, val created: String, val src: String)
+
+    fun saveMyLotto(round: Int, games: List<List<Int>>, src: String) {
+        val now = LocalDateTime.now().withNano(0).toString()
+        val existing = myLotto().filter { it.round == round }.map { it.nums }.toSet()
+        games.filter { it.sorted() !in existing }.forEach { g ->
+            writableDatabase.insert("lotto_my", null, ContentValues().apply { put("round", round); put("nums", g.sorted().joinToString(",")); put("created", now); put("src", src) })
+        }
+    }
+
+    fun myLotto(): List<MyLotto> = readableDatabase.rawQuery("SELECT id, round, nums, created, src FROM lotto_my ORDER BY round DESC, id ASC", null).use { c ->
+        buildList { while (c.moveToNext()) runCatching { add(MyLotto(c.getLong(0), c.getInt(1), c.getString(2).split(",").map { it.toInt() }, c.getString(3), c.getString(4) ?: "")) } }
+    }
+
+    fun deleteMyLotto(id: Long) { writableDatabase.delete("lotto_my", "id=?", arrayOf(id.toString())) }
+
+    var lottoOptions: LottoOptions
+        get() = runCatching { JSONObject(prefs.getString("lottoOpt", "{}")!!).let { o ->
+            fun set(k: String) = o.optString(k).split(",").mapNotNull { it.trim().toIntOrNull() }.filter { it in 1..45 }.toSet()
+            LottoOptions(set("fixed"), set("exclude"), o.optBoolean("oe"), o.optBoolean("sum"), o.optInt("cons"), o.optBoolean("last"))
+        } }.getOrDefault(LottoOptions())
+        set(v) { prefs.edit().putString("lottoOpt", JSONObject().put("fixed", v.fixed.sorted().joinToString(",")).put("exclude", v.exclude.sorted().joinToString(","))
+            .put("oe", v.balanceOddEven).put("sum", v.sumRange).put("cons", v.maxConsecutive).put("last", v.avoidLastDraw).toString()).apply() }
 
     var cardPeople: List<CardPerson>
         get() = runCatching {

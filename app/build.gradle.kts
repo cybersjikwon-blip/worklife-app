@@ -53,5 +53,7 @@ dependencies {
     implementation("com.google.android.gms:play-services-location:21.3.0")
     // 카드 문자 화면 캡처 글자인식 (기기 안에서만 처리, 인터넷 불필요)
     implementation("com.google.mlkit:text-recognition-korean:16.0.1")
+    // 로또 용지 QR 스캔 (구글 스캐너 화면, 카메라 권한 불필요)
+    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
     testImplementation("junit:junit:4.13.2")
 }

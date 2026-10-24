@@ -175,23 +175,24 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
             }
         }
         var mainTab by remember { mutableIntStateOf(0) }
-        val bg by androidx.compose.animation.animateColorAsState(if (working) Color(0xFF0E5C3F) else Color(0xFF22262D),
-            androidx.compose.animation.core.tween(600), label = "main")
+        // 앱 색(하늘→남색). 근무 중이면 민트→청록으로 부드럽게 바뀜
+        val g1 by androidx.compose.animation.animateColorAsState(if (working) Color(0xFF2DD4BF) else Color(0xFF4FA3FF), androidx.compose.animation.core.tween(700), label = "g1")
+        val g2 by androidx.compose.animation.animateColorAsState(if (working) Color(0xFF0F766E) else Color(0xFF2B3A8C), androidx.compose.animation.core.tween(700), label = "g2")
         Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp)
-            .background(bg, androidx.compose.foundation.shape.RoundedCornerShape(26.dp)).padding(bottom = 18.dp)) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+            .background(androidx.compose.ui.graphics.Brush.linearGradient(listOf(g1, g2)), androidx.compose.foundation.shape.RoundedCornerShape(28.dp)).padding(bottom = 18.dp, top = 12.dp)) {
+            // 알약 모양 구간 선택 (오늘 / 이번 주 / 이번 달)
+            Row(Modifier.padding(horizontal = 16.dp).background(Color.Black.copy(alpha = .18f), androidx.compose.foundation.shape.RoundedCornerShape(50)).padding(3.dp)) {
                 listOf("오늘", "이번 주", if (c.periodStartDay <= 1) "이번 달" else "이번 기간").forEachIndexed { i, l ->
-                    Column(Modifier.weight(1f).clickable { mainTab = i }.padding(vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(l, fontSize = 15.sp, fontWeight = if (mainTab == i) FontWeight.Bold else FontWeight.Normal,
-                            color = if (mainTab == i) Color.White else Color.White.copy(alpha = .45f))
-                        Box(Modifier.padding(top = 6.dp).height(3.dp).width(64.dp).background(if (mainTab == i) Color.White else Color.Transparent))
-                    }
+                    Text(l, fontSize = 13.sp, fontWeight = if (mainTab == i) FontWeight.Bold else FontWeight.Normal,
+                        color = if (mainTab == i) g2 else Color.White.copy(alpha = .8f),
+                        modifier = Modifier.background(if (mainTab == i) Color.White else Color.Transparent, androidx.compose.foundation.shape.RoundedCornerShape(50))
+                            .clickable { mainTab = i }.padding(horizontal = 14.dp, vertical = 6.dp))
                 }
             }
             Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(width = 38.dp, height = 44.dp).background(HomeGreen, androidx.compose.foundation.shape.RoundedCornerShape(8.dp)),
+                        Box(Modifier.size(42.dp).background(Color.White.copy(alpha = .22f), androidx.compose.foundation.shape.CircleShape),
                             contentAlignment = Alignment.Center) { Text(when (mainTab) { 0 -> "⏰"; 1 -> "📅"; else -> "🗓" }, fontSize = 18.sp) }
                         Column(Modifier.padding(start = 10.dp)) {
                             when (mainTab) {
@@ -215,6 +216,8 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
                         1 -> "주 한도 ${sm.weekLimitMin / 60}시간 중 ${(sm.weekMin * 100 / sm.weekLimitMin.coerceAtLeast(1))}% 사용"
                         else -> "출근 ${sm.attendedDays}/${sm.workdaysSoFar}일 · ${if (data.pay.bonus > 0) "만근 예정" else data.pay.bonusStatus}"
                     }, fontSize = 12.sp, color = Color.White.copy(alpha = .6f), maxLines = 2, modifier = Modifier.padding(top = 8.dp))
+                    // 하루 진행 막대: 출근 ━━●━━ 정시 (넘기면 주황으로 연장)
+                    if (mainTab == 0 && hol == null) DayBar(c, now, data.rec?.checkOut)
                     // 점심 외출 표시
                     if (mainTab == 0) {
                         data.tracker?.outings?.filter { it.lunch }?.forEach { o ->
@@ -228,16 +231,17 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
                     }
                 }
                 // 오른쪽 흰 상자: 핵심 숫자
-                Column(Modifier.padding(start = 10.dp).size(112.dp).background(Color.White, androidx.compose.foundation.shape.RoundedCornerShape(18.dp)).padding(10.dp),
+                Column(Modifier.padding(start = 10.dp).size(108.dp).background(Color.White.copy(alpha = .16f), androidx.compose.foundation.shape.RoundedCornerShape(22.dp))
+                    .border(1.dp, Color.White.copy(alpha = .25f), androidx.compose.foundation.shape.RoundedCornerShape(22.dp)).padding(10.dp),
                     verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
                     val (k, v, w) = when (mainTab) {
                         0 -> Triple("오늘 연장", hmShort(sm.todayMin), won(sm.todayPay))
                         1 -> Triple("이번 주", hmShort(sm.weekMin), won(sm.weekPay))
                         else -> Triple("예상 실수령", "%,d".format(data.pay.net / 10000) + "만", won(sm.monthPay) + " 연장")
                     }
-                    Text(k, fontSize = 11.sp, color = Color(0xFF6B7280))
-                    Text(v, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF111827), maxLines = 1, modifier = Modifier.padding(vertical = 2.dp))
-                    Text(w, fontSize = 11.sp, color = HomeGreen, maxLines = 1)
+                    Text(k, fontSize = 11.sp, color = Color.White.copy(alpha = .75f))
+                    Text(v, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, color = Color.White, maxLines = 1, modifier = Modifier.padding(vertical = 2.dp))
+                    Text(w, fontSize = 11.sp, color = Color(0xFFFFE08A), maxLines = 1)
                 }
             }
             // 알약 버튼 (네이버페이 '카드 변경하기' 자리)
@@ -252,9 +256,8 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
             }
         }
 
-        // ── 아이콘 바로가기 (5×2)
-        SCard(pad = 14.dp) {
-            val items = listOf(
+        // ── 바로가기: 파스텔 알약 2줄 (옆으로 넘김)
+        val items = listOf(
                 Triple("📅", "근무기록", goRecords), Triple("💰", "급여", goPay), Triple("💳", "카드", goCard),
                 Triple("🌴", "연차", goRecords), Triple("🎡", "점심 룰렛", goFun),
                 Triple("⏱", "퇴근 시각", { if (canAct) pickCheckout() }),
@@ -262,13 +265,16 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
                 Triple("🚗", if (field) "외근 취소" else "오늘 외근", { if (field) { Engine.setFieldWork(ctx, false); bump() } else if (data.rec == null && hol == null) { Engine.setFieldWork(ctx, true); bump() } }),
                 Triple("📍", "위치 확인", { Tracker.oneShot(ctx) { bump() }; bump() }),
                 Triple("⚙️", "설정", goSettings))
-            items.chunked(5).forEach { row ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                    row.forEach { (ic, label, act) ->
-                        Column(Modifier.weight(1f).clickable { act() }.padding(vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Box(Modifier.size(44.dp).background(MaterialTheme.colorScheme.onSurface.copy(alpha = .05f), androidx.compose.foundation.shape.RoundedCornerShape(14.dp)),
-                                contentAlignment = Alignment.Center) { Text(ic, fontSize = 22.sp) }
-                            Text(label, fontSize = 12.sp, maxLines = 1, modifier = Modifier.padding(top = 6.dp))
+        val pastel = listOf(0xFFE3F0FF, 0xFFFFF3C4, 0xFFEDE7FF, 0xFFDDF6F3, 0xFFFFE1D6, 0xFFFFE8F0, 0xFFE6F7EC, 0xFFE3F0FF, 0xFFFFF3C4, 0xFFEDE7FF)
+        Column(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            items.withIndex().chunked(5).forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    row.forEach { (i, v) ->
+                        val (ic, label, act) = v
+                        Row(Modifier.background(Color(pastel[i % pastel.size]), androidx.compose.foundation.shape.RoundedCornerShape(50)).clickable { act() }
+                            .padding(start = 6.dp, end = 14.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(30.dp).background(Color.White, androidx.compose.foundation.shape.CircleShape), contentAlignment = Alignment.Center) { Text(ic, fontSize = 15.sp) }
+                            Text(label, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF1F2937), modifier = Modifier.padding(start = 8.dp))
                         }
                     }
                 }
@@ -292,15 +298,17 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
             Triple("🏅", if (data.pay.bonus > 0) "만근 예정" else "만근 ${data.pay.bonusStatus}", "출근 ${sm.attendedDays}/${sm.workdaysSoFar}일") to goRecords)
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             glance.forEachIndexed { i, (t, act) ->
-                val col = listOf(Color(0xFF14B866), Color(0xFF0FA968), Color(0xFF2E9E6B), Color(0xFF1C8C7A), Color(0xFF3A9D4F), Color(0xFF4B8F3C))[i % 6]
-                Column(Modifier.width(168.dp).height(108.dp).background(col, androidx.compose.foundation.shape.RoundedCornerShape(20.dp))
+                // 항목마다 다른 파스텔 (급여 노랑, 연장 주황·하늘, 카드 보라, 연차 민트, 만근 분홍)
+                val (col, ink) = when (t.first) {
+                    "💵" -> 0xFFFFF3C4 to 0xFF8A6100; "⏱" -> 0xFFFFE1D6 to 0xFF9A3412; "📈" -> 0xFFE3F0FF to 0xFF1E40AF
+                    "💳" -> 0xFFEDE7FF to 0xFF5B21B6; "🌴" -> 0xFFDDF6F3 to 0xFF0F766E; else -> 0xFFFFE8F0 to 0xFF9D174D
+                }
+                Column(Modifier.width(164.dp).height(112.dp).background(Color(col), androidx.compose.foundation.shape.RoundedCornerShape(24.dp))
                     .clickable { act() }.padding(14.dp), verticalArrangement = Arrangement.SpaceBetween) {
-                    Box(Modifier.size(32.dp).background(Color.White.copy(alpha = .9f), androidx.compose.foundation.shape.CircleShape), contentAlignment = Alignment.Center) {
-                        Text(t.first, fontSize = 16.sp)
-                    }
+                    Text(t.first, fontSize = 22.sp)
                     Column {
-                        Text(t.second, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1)
-                        Text(t.third, fontSize = 12.sp, color = Color.White.copy(alpha = .85f), maxLines = 1)
+                        Text(t.second, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold, color = Color(ink), maxLines = 1)
+                        Text(t.third, fontSize = 12.sp, color = Color(ink).copy(alpha = .75f), maxLines = 1)
                     }
                 }
             }
@@ -408,7 +416,7 @@ private fun todayStatus(c: Company, d: HomeData, hol: String?, now: LocalDateTim
 }
 
 
-private val HomeGreen = Color(0xFF03C75A)
+private val HomeGreen = Color(0xFF3E91FF) // 앱 대표색 (로딩 화면과 같은 하늘색)
 
 private fun greeting(now: LocalDateTime): String = when (now.hour) {
     in 4..8 -> "좋은 아침이에요 ☀️"
@@ -429,8 +437,32 @@ private fun IconCircle(icon: String, bg: Color, onClick: () -> Unit) {
 @Composable
 private fun PillButton(text: String, modifier: Modifier = Modifier, enabled: Boolean = true, onClick: () -> Unit) {
     Box(modifier.height(44.dp)
-        .border(1.dp, Color.White.copy(alpha = if (enabled) .35f else .15f), androidx.compose.foundation.shape.RoundedCornerShape(50))
+        .background(Color.White.copy(alpha = if (enabled) .95f else .3f), androidx.compose.foundation.shape.RoundedCornerShape(50))
         .clickable(enabled = enabled, onClick = onClick), contentAlignment = Alignment.Center) {
-        Text(text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color.White.copy(alpha = if (enabled) 1f else .4f))
+        Text(text, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFF1E3A8A).copy(alpha = if (enabled) 1f else .5f))
+    }
+}
+
+/** 하루 진행 막대: 출근~정시를 100%로, 정시 이후는 주황으로 덧붙임 (최대 +3시간) */
+@Composable
+private fun DayBar(c: Company, now: LocalDateTime, out: LocalTime?) {
+    val st = hm(c.workStart).minOfDay(); val en = hm(c.workEnd).minOfDay()
+    val cur = (out ?: now.toLocalTime()).minOfDay()
+    val span = (en - st).coerceAtLeast(1)
+    val p = ((cur - st).toFloat() / span).coerceIn(0f, 1f)
+    val over = ((cur - en).toFloat() / 180f).coerceIn(0f, 1f)
+    Column(Modifier.padding(top = 10.dp)) {
+        Row(Modifier.fillMaxWidth().height(8.dp)) {
+            Box(Modifier.weight(1f).fillMaxHeight().background(Color.White.copy(alpha = .22f), androidx.compose.foundation.shape.RoundedCornerShape(50))) {
+                Box(Modifier.fillMaxHeight().fillMaxWidth(p).background(Color.White, androidx.compose.foundation.shape.RoundedCornerShape(50)))
+            }
+            if (over > 0f) Box(Modifier.padding(start = 3.dp).weight(.35f).fillMaxHeight().background(Color.White.copy(alpha = .15f), androidx.compose.foundation.shape.RoundedCornerShape(50))) {
+                Box(Modifier.fillMaxHeight().fillMaxWidth(over).background(Color(0xFFFFB86B), androidx.compose.foundation.shape.RoundedCornerShape(50)))
+            }
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 3.dp)) {
+            Text(c.workStart, fontSize = 10.sp, color = Color.White.copy(alpha = .6f), modifier = Modifier.weight(1f))
+            Text(c.workEnd + if (over > 0f) " +${hmShort(cur - en)}" else "", fontSize = 10.sp, color = Color.White.copy(alpha = .75f))
+        }
     }
 }

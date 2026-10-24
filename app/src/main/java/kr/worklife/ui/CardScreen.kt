@@ -79,6 +79,10 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
     val imageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(20)) { uris ->
         if (uris.isNotEmpty()) runImport("캡처 ${uris.size}장") { kr.worklife.bg.CardOcr.importImages(ctx, uris) }
     }
+    LaunchedEffect(version, txs) {
+        val mid = CardShare.memoTx
+        if (mid > 0) { txs.firstOrNull { it.id == mid }?.let { editTx = it }; CardShare.memoTx = -1L }
+    }
     LaunchedEffect(version) {
         CardShare.take()?.let { t -> runImport("공유한 문자") { CardIngest.importText(ctx, t) } }
         CardShare.takeImages()?.let { l -> runImport("공유한 캡처 ${l.size}장") { kr.worklife.bg.CardOcr.importImages(ctx, l) } }
@@ -227,7 +231,16 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
         SCard {
             val title = when (filter) { -2 -> "사용 내역"; -1 -> "미지정 내역"; else -> "${people.getOrNull(filter)?.name ?: ""} 내역" }
             CardTitle(title, trailing = { if (filter != -2) TextButton(onClick = { filter = -2 }) { Text("전체 보기") } })
+            // 검색 (가맹점·메모) + 메모 안 한 2만원 이상만 보기
+            var q by remember { mutableStateOf("") }
+            var onlyNoMemo by remember { mutableStateOf(false) }
+            val noMemo = txs.count { it.needsMemo && it.memo.isBlank() && !it.excluded }
+            OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), singleLine = true, placeholder = { Text("🔍 가맹점·메모 검색 (예: 주유, 거래처)") })
+            if (noMemo > 0 || onlyNoMemo) FilterChip(onlyNoMemo, { onlyNoMemo = !onlyNoMemo },
+                label = { Text("✏️ 메모 안 한 2만원 이상 ${noMemo}건") }, modifier = Modifier.padding(top = 4.dp))
             val shown = txs.filter { t ->
+                (q.isBlank() || t.merchant.contains(q.trim(), true) || t.memo.contains(q.trim(), true)) &&
+                (!onlyNoMemo || (t.needsMemo && t.memo.isBlank() && !t.excluded)) &&
                 when (filter) {
                     -2 -> true
                     -1 -> cardIncluded(t, people, bcOnly) && matchPerson(t, people) == -1 && inRange(t, from to to)
@@ -247,6 +260,8 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
                             t.foreign.ifBlank { null }, if (t.source == "noti") "알림톡" else if (t.source == "manual") "직접" else null,
                             if (t.excluded) "제외됨" else null).joinToString(" · "),
                             fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f), maxLines = 1)
+                        if (t.memo.isNotBlank()) Text("📝 ${t.memo}", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary, maxLines = 2)
+                        else if (t.needsMemo && inc) Text("✏️ 어디에 쓰셨나요? 눌러서 메모", fontSize = 12.sp, color = OtOrange)
                     }
                     Text((if (t.isCancel) "−" else "") + wonL(kotlin.math.abs(t.amount)), fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
                         color = when { !inc -> MaterialTheme.colorScheme.onSurface.copy(alpha = .4f); t.isCancel -> CancelRed; else -> MaterialTheme.colorScheme.onSurface })
@@ -382,6 +397,7 @@ private fun PeopleDialog(init: List<CardPerson>, onDismiss: () -> Unit, onSave: 
 private fun TxDialog(t: CardTx, people: List<CardPerson>, onDismiss: () -> Unit, onSave: (CardTx, Boolean) -> Unit, onDelete: () -> Unit) {
     var amt by remember { mutableStateOf(kotlin.math.abs(t.amount).toString()) }
     var merchant by remember { mutableStateOf(t.merchant) }
+    var memo by remember { mutableStateOf(t.memo) }
     var person by remember { mutableIntStateOf(t.person) }
     var excluded by remember { mutableStateOf(t.excluded) }
     var always by remember { mutableStateOf(t.card.isNotBlank()) }
@@ -392,6 +408,14 @@ private fun TxDialog(t: CardTx, people: List<CardPerson>, onDismiss: () -> Unit,
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Field(if (t.foreign.isNotBlank()) "원화 금액 (${t.foreign})" else "금액(원)", amt, { amt = it.filter { c -> c.isDigit() } }, number = true)
                 Field("가맹점", merchant, { merchant = it })
+                // 메모: 나중에 "이거 어디에 썼더라?" 할 때 (2만원 이상은 맨 눈에 띄게)
+                OutlinedTextField(memo, { memo = it.take(100) }, Modifier.fillMaxWidth().padding(top = 4.dp),
+                    label = { Text(if (t.needsMemo) "📝 어디에 쓰셨나요? (2만원 이상)" else "📝 메모 (선택)") }, maxLines = 3)
+                Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("식비", "회식", "거래처", "주유", "사무용품", "택배", "생활용품", "병원", "선물").forEach { w ->
+                        AssistChip(onClick = { memo = if (memo.isBlank()) w else "$memo, $w" }, label = { Text(w, fontSize = 12.sp) })
+                    }
+                }
                 Text("어느 카드?", fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     FilterChip(person == -1, { person = -1 }, label = { Text("자동") })
@@ -409,7 +433,7 @@ private fun TxDialog(t: CardTx, people: List<CardPerson>, onDismiss: () -> Unit,
         confirmButton = {
             TextButton(onClick = {
                 val v = amt.toLongOrNull() ?: kotlin.math.abs(t.amount)
-                onSave(t.copy(amount = if (t.isCancel) -v else v, merchant = merchant.trim(), person = person, excluded = excluded), always && person >= 0)
+                onSave(t.copy(amount = if (t.isCancel) -v else v, merchant = merchant.trim(), person = person, excluded = excluded, memo = memo.trim()), always && person >= 0)
             }) { Text("저장") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("닫기") } })
@@ -475,6 +499,8 @@ object CardShare {
     fun take(): String? = pending.also { pending = null }
     fun putImages(l: List<android.net.Uri>) { images = l }
     fun takeImages(): List<android.net.Uri>? = images.also { images = null }
+    /** 알림 '눌러서 메모'로 들어온 결제 id */
+    @Volatile var memoTx: Long = -1L
 }
 
 /** 승인 문자 여러 개를 한꺼번에 붙여넣기 */

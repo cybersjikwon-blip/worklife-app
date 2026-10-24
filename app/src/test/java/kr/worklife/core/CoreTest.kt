@@ -537,4 +537,41 @@ class CoreTest {
         val sm = summarizeNow(txs, ppl, common, true, today)
         assertEquals(listOf(1000L, 3000L, 4000L), sm.perPerson.map { it.first }); assertEquals(8000L, sm.total)
     }
+
+    // ── 18: 로또
+    @Test fun lottoRounds() {
+        assertEquals(1, Lotto.latestRound(LocalDateTime.of(2002, 12, 7, 21, 0)))
+        // 2026-10-24(토) 추첨 전 → 지난주, 추첨 후 → 이번 주
+        val before = Lotto.latestRound(LocalDateTime.of(2026, 10, 24, 20, 0)); val after = Lotto.latestRound(LocalDateTime.of(2026, 10, 24, 21, 0))
+        assertEquals(before + 1, after); assertEquals(LocalDate.of(2026, 10, 24), Lotto.dateOf(after))
+        assertEquals(after + 1, Lotto.nextRound(LocalDateTime.of(2026, 10, 25, 9, 0)))
+    }
+    @Test fun lottoGenerate() {
+        val o = LottoOptions(fixed = setOf(7, 21), exclude = setOf(1, 2, 3), balanceOddEven = true, sumRange = true, maxConsecutive = 2)
+        repeat(300) { i ->
+            val g = Lotto.generate(o, rnd = kotlin.random.Random(i))
+            assertEquals(6, g.toSet().size); assertTrue(g.containsAll(listOf(7, 21))); assertTrue(g.none { it in 1..3 })
+            assertTrue(Lotto.ok(g, o))
+        }
+        // 불가능한 조건(40개 제외)이어도 6개는 나옴
+        assertEquals(6, Lotto.generate(LottoOptions(exclude = (1..40).toSet())).toSet().size)
+    }
+    @Test fun lottoRankQrJson() {
+        val d = LottoDraw(1190, LocalDate.of(2025, 9, 27), listOf(3, 11, 17, 26, 38, 45), 9)
+        assertEquals(1, Lotto.rank(listOf(3, 11, 17, 26, 38, 45), d)); assertEquals(2, Lotto.rank(listOf(3, 11, 17, 26, 38, 9), d))
+        assertEquals(3, Lotto.rank(listOf(3, 11, 17, 26, 38, 1), d)); assertEquals(5, Lotto.rank(listOf(3, 11, 17, 1, 2, 4), d)); assertEquals(0, Lotto.rank(listOf(1, 2, 4, 5, 6, 7), d))
+        val qr = Lotto.parseQr("http://m.dhlottery.co.kr/?v=1190q031117263845q010203040506n0712192533440000123456")!!
+        assertEquals(1190, qr.first); assertEquals(3, qr.second.size); assertEquals(listOf(3, 11, 17, 26, 38, 45), qr.second[0])
+        assertNull(Lotto.parseQr("https://naver.com"))
+        val js = "{\"totSellamnt\":1,\"returnValue\":\"success\",\"drwNoDate\":\"2025-09-27\",\"firstWinamnt\":2500000000,\"drwtNo6\":45,\"drwtNo4\":26,\"firstPrzwnerCo\":11,\"drwtNo5\":38,\"bnusNo\":9,\"firstAccumamnt\":1,\"drwNo\":1190,\"drwtNo2\":11,\"drwtNo3\":17,\"drwtNo1\":3}"
+        val p = Lotto.parseDrawJson(js)!!
+        assertEquals(1190, p.round); assertEquals(listOf(3, 11, 17, 26, 38, 45), p.nums); assertEquals(9, p.bonus); assertEquals(11, p.firstWinners)
+        assertNull(Lotto.parseDrawJson("{\"returnValue\":\"fail\"}"))
+        val st = Lotto.stats(listOf(d, d.copy(round = 1189, nums = listOf(3, 4, 5, 6, 7, 8))))
+        assertEquals(2, st.freq[3]); assertEquals(3, st.hot[0]); assertEquals(1190, st.lastSeen[3])
+    }
+    @Test fun cardMemoKept() {
+        val t = CardTx(ts = R0, amount = 25000, memo = "거래처 점심")
+        assertEquals("거래처 점심", t.memo); assertTrue(t.needsMemo); assertTrue(!t.copy(amount = 19999).needsMemo); assertTrue(!t.copy(memo = "").copy(amount = -30000).needsMemo)
+    }
 }
