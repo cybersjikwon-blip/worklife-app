@@ -574,4 +574,13 @@ class CoreTest {
         val t = CardTx(ts = R0, amount = 25000, memo = "거래처 점심")
         assertEquals("거래처 점심", t.memo); assertTrue(t.needsMemo); assertTrue(!t.copy(amount = 19999).needsMemo); assertTrue(!t.copy(memo = "").copy(amount = -30000).needsMemo)
     }
+    @Test fun lottoNewSiteJson() {
+        val js = "{\"resultCode\":null,\"data\":{\"list\":[{\"ltEpsd\":1190,\"ltRflYmd\":\"20250927\",\"tm1WnNo\":3,\"tm2WnNo\":11,\"tm3WnNo\":17,\"tm4WnNo\":26,\"tm5WnNo\":38,\"tm6WnNo\":45,\"bnsWnNo\":9,\"rnk1WnAmt\":2500000000,\"rnk1WnNope\":11}," +
+            "{\"tm6WnNo\":\"8\",\"ltEpsd\":\"1189\",\"bnsWnNo\":\"10\",\"tm1WnNo\":\"1\",\"tm2WnNo\":\"2\",\"tm3WnNo\":\"3\",\"tm4WnNo\":\"4\",\"tm5WnNo\":\"5\",\"ltRflYmd\":\"20250920\"}]}}"
+        val l = Lotto.parseNewList(js)
+        assertEquals(2, l.size); assertEquals(1190, l[0].round); assertEquals(LocalDate.of(2025, 9, 27), l[0].date)
+        assertEquals(listOf(3, 11, 17, 26, 38, 45), l[0].nums); assertEquals(9, l[0].bonus); assertEquals(11, l[0].firstWinners)
+        assertEquals(listOf(1, 2, 3, 4, 5, 8), l[1].nums)
+        assertTrue(Lotto.parseNewList("<html>서비스 접속이 차단 되었습니다</html>").isEmpty())
+    }
 }

@@ -64,15 +64,15 @@ fun LottoScreen(modifier: Modifier, onBack: () -> Unit) {
                 syncMsg = when {
                     fail == -1 -> "당첨번호를 받지 못했어요. 인터넷 연결을 확인해 주세요."
                     ok == 0 && fail == 0 -> null
-                    fail > 0 && ok == 0 -> "당첨번호를 받지 못했어요 (${fail}회). 잠시 뒤 [새로고침]을 눌러 주세요."
+                    fail > 0 && ok == 0 -> (LottoNet.lastError ?: "당첨번호를 받지 못했어요") + " · 위 카드를 눌러 다시 받기"
                     fail > 0 -> "${ok}회 받음 · ${fail}회는 아직 발표 전이거나 실패"
                     else -> "${ok}회 받음"
                 }
             }
         }.start()
     }
-    // 처음 열 때: 최근 10회만 빠르게 (통계 탭에서 더 받기)
-    LaunchedEffect(Unit) { sync(10) }
+    // 처음 열 때: 전 회차를 요청 1번에 (이미 있으면 받지 않음)
+    LaunchedEffect(Unit) { sync(Lotto.latestRound()) }
 
     Column(modifier.fillMaxSize()) {
         MiniAppHeader("로또 6/45", "🎱", onBack) {
@@ -88,7 +88,8 @@ fun LottoScreen(modifier: Modifier, onBack: () -> Unit) {
         val drawDay = Lotto.dateOf(next)
         val dday = ChronoUnit.DAYS.between(java.time.LocalDate.now(), drawDay)
         Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp)
-            .background(androidx.compose.ui.graphics.Brush.linearGradient(listOf(Color(0xFF3E91FF), Color(0xFF2B3A8C))), RoundedCornerShape(24.dp)).padding(18.dp)) {
+            .background(androidx.compose.ui.graphics.Brush.linearGradient(listOf(Color(0xFF3E91FF), Color(0xFF2B3A8C))), RoundedCornerShape(24.dp))
+            .clickable { sync(Lotto.latestRound()) }.padding(18.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("제${next}회 · ${drawDay.monthValue}/${drawDay.dayOfMonth}(토) 추첨", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp, modifier = Modifier.weight(1f))
                 Text(if (dday == 0L) "오늘 20:45" else "D-$dday", color = Color.White, fontSize = 13.sp,
@@ -113,8 +114,8 @@ fun LottoScreen(modifier: Modifier, onBack: () -> Unit) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             when (tab) {
                 0 -> LottoGenerate(latest) { tab = 1 }
-                1 -> LottoMine(draws, dataVer) { sync(10) }
-                else -> LottoStats(draws, syncing, prog) { n -> sync(n) }
+                1 -> LottoMine(draws, dataVer) { sync(Lotto.latestRound()) }
+                else -> LottoStats(draws, syncing, prog) { _ -> sync(Lotto.latestRound()) }
             }
             Spacer(Modifier.height(24.dp))
         }

@@ -105,6 +105,25 @@ object Lotto {
             nums, num("bnusNo").toInt(), runCatching { num("firstWinamnt").toLong() }.getOrDefault(0), runCatching { num("firstPrzwnerCo").toInt() }.getOrDefault(0))
     }.getOrNull()
 
+    /**
+     * 2025 개편 사이트 응답: /lt645/selectPstLt645Info.do?srchLtEpsd=all (또는 회차 번호)
+     * {"data":{"list":[{"ltEpsd":1190,"ltRflYmd":"20250927","tm1WnNo":3,…,"tm6WnNo":45,"bnsWnNo":9,"rnk1WnAmt":…,"rnk1WnNope":…},…]}}
+     * 필드가 숫자든 문자열이든, 순서가 어떻든 읽음
+     */
+    fun parseNewList(js: String): List<LottoDraw> =
+        Regex("""\{[^{}]*"ltEpsd"[^{}]*\}""").findAll(js).mapNotNull { m ->
+            val o = m.value
+            fun f(k: String) = Regex("\"$k\"\\s*:\\s*\"?(\\d+)").find(o)?.groupValues?.get(1)
+            runCatching {
+                val nums = (1..6).map { f("tm${it}WnNo")!!.toInt() }
+                val ymd = f("ltRflYmd")!!
+                if (nums.any { it !in 1..45 } || nums.toSet().size != 6) null
+                else LottoDraw(f("ltEpsd")!!.toInt(), LocalDate.of(ymd.take(4).toInt(), ymd.substring(4, 6).toInt(), ymd.substring(6, 8).toInt()),
+                    nums.sorted(), f("bnsWnNo")!!.toInt(), f("rnk1WnAmt")?.toLongOrNull() ?: 0,
+                    (f("rnk1WnNope") ?: f("rnk1WnCnt") ?: f("rnk1WinnerCnt"))?.toIntOrNull() ?: 0)
+            }.getOrNull()
+        }.toList()
+
     data class Stats(val count: Int, val freq: IntArray, val lastSeen: IntArray, val hot: List<Int>, val cold: List<Int>, val longGap: List<Int>,
                      val oddAvg: Double, val sumAvg: Double)
 

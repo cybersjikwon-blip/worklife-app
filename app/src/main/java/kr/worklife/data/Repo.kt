@@ -320,6 +320,13 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
         }, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
+    /** 여러 회차 한꺼번에 (전 회차 1,200여 개도 순식간에) */
+    fun saveDraws(list: List<LottoDraw>) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try { list.forEach { saveDraw(it) }; db.setTransactionSuccessful() } finally { db.endTransaction() }
+    }
+
     fun draws(): List<LottoDraw> = readableDatabase.rawQuery("SELECT round, date, nums, bonus, prize, winners FROM lotto_draws ORDER BY round DESC", null).use { c ->
         buildList { while (c.moveToNext()) runCatching {
             add(LottoDraw(c.getInt(0), LocalDate.parse(c.getString(1)), c.getString(2).split(",").map { it.toInt() }, c.getInt(3), c.getLong(4), c.getInt(5)))
