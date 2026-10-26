@@ -152,9 +152,23 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
                 OutlinedButton(onClick = goSettings) { Text("회사 위치 확인") }
             }
         }
-        if (data.needCheck.isNotEmpty()) SCard(onClick = goRecords) {
+        if (data.needCheck.isNotEmpty()) SCard(onClick = goRecords, pad = 16.dp) {
             Text("퇴근 확인이 필요한 날 ${data.needCheck.size}일", fontWeight = FontWeight.SemiBold, color = OtOrange)
-            Text(data.needCheck.joinToString(", ") { "${it.day.dayOfMonth}일" } + " — 눌러서 확인", fontSize = 14.sp)
+            data.needCheck.take(5).forEach { r ->
+                Text("${r.day.monthValue}/${r.day.dayOfMonth}(${wd(r.day)}) 퇴근 ${r.checkOut?.hhmm() ?: "-"} · ${r.note.substringBefore(" / ").take(40)}",
+                    fontSize = 13.sp, maxLines = 1, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .7f))
+            }
+            Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton(onClick = { Engine.confirmAll(ctx, data.needCheck); bump() }) { Text("맞아요, 이대로 확정") }
+                OutlinedButton(onClick = goRecords) { Text("고치기") }
+            }
+        }
+        // 위치 기록은 있는데 최근 며칠 동안 회사 안이 한 번도 확인 안 됨 → 회사 위치가 틀렸을 가능성
+        val inside = remember(version) { runCatching { Engine.recentInsideStats(ctx) }.getOrDefault(0 to 0) }
+        if (c.hasLocation && inside.first >= 3 && inside.second == 0) SCard(onClick = goSettings, pad = 16.dp) {
+            Text("회사 위치를 확인해 주세요", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.error)
+            Text("최근 근무일 ${inside.first}일 동안 회사 안에서 위치가 한 번도 확인되지 않았어요. 회사에 있을 때 설정 > 회사 > '지금 위치를 회사로'를 눌러 주세요. (반경 ${c.radiusM.toInt()}m)",
+                fontSize = 13.sp)
         }
 
         // ── 메인 카드 (진한 색, 근무 중이면 진한 녹색): [오늘 | 이번 주 | 이번 달] 탭

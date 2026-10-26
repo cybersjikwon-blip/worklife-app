@@ -390,13 +390,16 @@ class CoreTest {
         g.feedAll(inside("16:30") + smp("16:45", 8000.0, 400.0))
         assertTrue(g.checkout != null)
     }
-    @Test fun noInsideTodayAsksCheck() {
-        // 오늘 회사 확인 기록이 하나도 없이 정시 이후 멀리서만 잡힘 → 정시로 임시 + 확인 필요
+    @Test fun noInsideTodayUsesLocation() {
+        // 회사 안 기록 없이 17:30에 6km 밖 확인 → 이동 12분 빼서 17:18 퇴근(자동), 확인 요청 없음
         val g = tr()
         g.feedAll(listOf(smp("17:30", 6000.0, 20.0)))
-        assertEquals(at("15:00"), g.checkout)
-        assertTrue(g.uncertain && g.noInsideToday)
-        assertEquals(Source.NEEDS_CHECK, g.finalize().second)
+        assertEquals(at("17:18"), g.checkout)
+        assertTrue(!g.uncertain && g.noInsideToday)
+        assertEquals(Source.AUTO, g.finalize().second)
+        // 정시 직후 가까이서 확인되면 정시보다 앞당기지 않음
+        val h = tr(); h.feedAll(listOf(smp("15:02", 3000.0)))
+        assertEquals(at("15:00"), h.checkout)
     }
     @Test fun noInsideBeforeEndIgnored() {
         val g = tr()
@@ -582,5 +585,18 @@ class CoreTest {
         assertEquals(listOf(3, 11, 17, 26, 38, 45), l[0].nums); assertEquals(9, l[0].bonus); assertEquals(11, l[0].firstWinners)
         assertEquals(listOf(1, 2, 3, 4, 5, 8), l[1].nums)
         assertTrue(Lotto.parseNewList("<html>서비스 접속이 차단 되었습니다</html>").isEmpty())
+    }
+    @Test fun lottoHotColdZones() {
+        val draws = (1..50).map { r -> LottoDraw(r, LocalDate.of(2024, 1, 1), listOf(1, 2, 3, 4, 5, 6 + r % 10).distinct().let { if (it.size < 6) it + 45 else it }.sorted(), 44) }
+        val (hot, cold) = Lotto.hotCold(draws, 50)
+        assertTrue(1 in hot && 2 in hot); assertEquals(15, cold.size)
+        val o = LottoOptions(hotCount = 2, coldCount = 2, zones = listOf(1, -1, -1, -1, 2))
+        repeat(100) { i ->
+            val g = Lotto.generate(o, rnd = kotlin.random.Random(i), hot = hot, cold = cold)
+            assertEquals(2, g.count { it in hot }); assertEquals(2, g.count { it in cold })
+            assertEquals(1, g.count { it < 10 }); assertEquals(2, g.count { it >= 40 })
+        }
+        // 불가능한 조합(핫 6 + 콜드 6)도 결과는 나옴
+        assertEquals(6, Lotto.generate(LottoOptions(hotCount = 6, coldCount = 6), hot = hot, cold = cold).toSet().size)
     }
 }

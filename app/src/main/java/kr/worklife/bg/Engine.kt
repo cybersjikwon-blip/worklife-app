@@ -46,7 +46,10 @@ object Engine {
             // 마감 시각 지남 → 강제 마감
             if (now.toLocalTime().isAfter(hm(repo.settings.dayCutoff))) g.finalize().first else return null
         }
-        val src = if (g.checkout != null && !g.uncertain) Source.AUTO else Source.NEEDS_CHECK
+        val src = when {
+            g.checkout != null && !g.uncertain -> Source.AUTO
+            else -> Source.NEEDS_CHECK
+        }
         val rec = toRecord(c, d, g, co, src)
         if (existing != rec) repo.saveDay(rec)
         return rec
@@ -84,6 +87,31 @@ object Engine {
         runCatching { Scheduler.ensure(ctx) }
         runCatching { Geo.register(ctx) }
         runCatching { Widgets.updateAll(ctx) }
+    }
+
+    /**
+     * 최근 근무일 7일: 위치 기록이 있는 날 / 그중 회사 안이 한 번이라도 확인된 날
+     * → 위치 기록은 있는데 회사 안이 하루도 없으면 '회사 위치가 틀렸을 수 있음' 안내
+     */
+    fun recentInsideStats(ctx: Context, today: LocalDate = LocalDate.now()): Pair<Int, Int> {
+        val repo = Repo.get(ctx)
+        var withLocs = 0; var withInside = 0
+        for (back in 0L..10L) {
+            val d = today.minusDays(back)
+            val c = repo.companyOn(d) ?: continue
+            if (!HolidayCalendar(c).isWorkday(d)) continue
+            val g = evaluate(ctx, d).tracker ?: continue
+            withLocs++
+            if (g.firstInside != null) withInside++
+            if (withLocs >= 7) break
+        }
+        return withLocs to withInside
+    }
+
+    /** '퇴근 확인 필요' 날들을 지금 기록 그대로 확정 */
+    fun confirmAll(ctx: Context, days: List<DayRecord>) {
+        val repo = Repo.get(ctx)
+        days.forEach { r -> repo.saveDay(r.copy(source = Source.MANUAL, note = (r.note.substringBefore(" / ") + " / 확인함").trim(' ', '/'))) }
     }
 
     const val FIELD_NOTE = "외근"

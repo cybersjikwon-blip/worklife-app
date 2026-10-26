@@ -292,15 +292,21 @@ class GeofenceTracker(private val c: Company, private val s: AppSettings, val da
         }
         val far = distance(smp) - smp.accuracy >= s.fastExitFor(c)
         val li = lastInside ?: run {
-            // 오늘 회사 확인 기록이 하나도 없는데 정시 이후 확실히 멀리 있음 → 놓친 퇴근. 정시로 임시 기록 + 확인 요청
+            // 오늘 회사 안 기록이 없는데 정시 이후 확실히 밖 → 위치 기준으로 퇴근 시각 추정
+            // (처음 밖으로 확인된 시각 − 이동시간(거리÷시속30km), 정시보다 이르면 정시) → 확인 요청 없이 자동 기록
             if (!holiday && !smp.ts.isBefore(endDt)) {
-                if (outSince == null) outSince = smp.ts
+                if (outSince == null) { outSince = smp.ts; outFirst = smp }
                 outCount++
                 val away = ChronoUnit.MINUTES.between(outSince, smp.ts)
                 if (far || (outCount >= s.exitConfirmSamples && away >= s.exitConfirmMin)) {
-                    noInsideToday = true; uncertain = true
-                    notes += "오늘 회사 위치 확인 기록 없음 (${smp.ts.toLocalTime().hhmm()} 회사 밖 확인) → 퇴근 시각 확인 필요"
-                    checkout = endDt
+                    noInsideToday = true
+                    val of = outFirst ?: smp
+                    val travel = if (of.kind == "exit") 1L else kotlin.math.ceil(distance(of) / 500.0).toLong().coerceIn(1, 90)
+                    var est = of.ts.minusMinutes(travel).withSecond(0).withNano(0)
+                    if (est.isBefore(endDt)) est = endDt
+                    estimated = true
+                    notes += "회사 안 기록 없음 → ${of.ts.toLocalTime().hhmm()} 회사 밖(${(distance(of) / 1000).let { "%.1f".format(it) }}km) 확인 기준 ${est.toLocalTime().hhmm()} 퇴근"
+                    checkout = est
                 }
             }
             return checkout

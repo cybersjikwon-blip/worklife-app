@@ -17,6 +17,10 @@ data class LottoOptions(
     val sumRange: Boolean = false,        // 합계 100~175 (역대 당첨의 약 70%)
     val maxConsecutive: Int = 0,          // 연속번호 최대 개수 (0 = 제한 없음, 2 = 2연속까지만)
     val avoidLastDraw: Boolean = false,   // 지난 회차 당첨번호 빼기
+    val hotCount: Int = -1,               // 핫 번호(최근 많이 나온 15개) 몇 개 (-1 = 상관없음)
+    val coldCount: Int = -1,              // 콜드 번호(최근 적게 나온 15개) 몇 개
+    val zones: List<Int> = List(5) { -1 }, // 번호대별 개수 [1~9, 10번대, 20번대, 30번대, 40번대] (-1 = 상관없음)
+    val statWindow: Int = 50,             // 핫·콜드 기준: 최근 n회
 )
 
 object Lotto {
@@ -36,16 +40,37 @@ object Lotto {
     fun dateOf(round: Int): LocalDate = FIRST_DRAW.plusWeeks((round - 1).toLong())
 
     /** 조건에 맞는 한 게임. 조건이 너무 빡빡하면 조건을 하나씩 풀어서라도 반드시 결과를 냄 */
-    fun generate(o: LottoOptions, last: LottoDraw? = null, rnd: Random = Random.Default): List<Int> {
+    fun zoneOf(n: Int) = if (n < 10) 0 else n / 10
+
+    /** 최근 window회 기준 핫(많이 나온 15개)·콜드(적게 나온 15개) */
+    fun hotCold(draws: List<LottoDraw>, window: Int = 50): Pair<Set<Int>, Set<Int>> {
+        if (draws.isEmpty()) return emptySet<Int>() to emptySet()
+        val st = stats(draws, window)
+        val order = (1..45).sortedWith(compareByDescending<Int> { st.freq[it] }.thenBy { it })
+        return order.take(15).toSet() to order.takeLast(15).toSet()
+    }
+
+    fun generate(o: LottoOptions, last: LottoDraw? = null, rnd: Random = Random.Default, hot: Set<Int> = emptySet(), cold: Set<Int> = emptySet()): List<Int> {
+        hotSet = hot; coldSet = cold
+        return generate0(o, last, rnd)
+    }
+
+    @Volatile private var hotSet: Set<Int> = emptySet()
+    @Volatile private var coldSet: Set<Int> = emptySet()
+
+    private fun generate0(o: LottoOptions, last: LottoDraw?, rnd: Random): List<Int> {
         val fixed = o.fixed.filter { it in 1..45 }.take(5).toSet()
         val banned = (o.exclude + (if (o.avoidLastDraw && last != null) last.nums else emptyList())) - fixed
         val pool = (1..45).filter { it !in banned && it !in fixed }
         if (pool.size + fixed.size < 6) return ((1..45).filter { it !in fixed }.shuffled(rnd).take(6 - fixed.size) + fixed).sorted()
-        repeat(3000) {
+        // 조건이 빡빡하면 덜 중요한 것부터 하나씩 풀어서라도 결과를 냄 (합계 → 연속 → 홀짝 → 번호대 → 핫·콜드)
+        val relax = listOf(o, o.copy(sumRange = false), o.copy(sumRange = false, maxConsecutive = 0),
+            o.copy(sumRange = false, maxConsecutive = 0, balanceOddEven = false),
+            o.copy(sumRange = false, maxConsecutive = 0, balanceOddEven = false, zones = List(5) { -1 }))
+        for (oo in relax) repeat(if (oo === o) 6000 else 1500) {
             val pick = (pool.shuffled(rnd).take(6 - fixed.size) + fixed).sorted()
-            if (ok(pick, o)) return pick
+            if (ok(pick, oo)) return pick
         }
-        repeat(500) { val pick = (pool.shuffled(rnd).take(6 - fixed.size) + fixed).sorted(); if (ok(pick, o.copy(sumRange = false))) return pick }
         return (pool.shuffled(rnd).take(6 - fixed.size) + fixed).sorted()
     }
 
@@ -53,6 +78,9 @@ object Lotto {
         if (o.balanceOddEven) { val odd = p.count { it % 2 == 1 }; if (odd < 2 || odd > 4) return false }
         if (o.sumRange) { val s = p.sum(); if (s < 100 || s > 175) return false }
         if (o.maxConsecutive > 0 && longestRun(p) > o.maxConsecutive) return false
+        if (o.hotCount >= 0 && hotSet.isNotEmpty() && p.count { it in hotSet } != o.hotCount) return false
+        if (o.coldCount >= 0 && coldSet.isNotEmpty() && p.count { it in coldSet } != o.coldCount) return false
+        for (z in 0..4) { val want = o.zones.getOrElse(z) { -1 }; if (want >= 0 && p.count { zoneOf(it) == z } != want) return false }
         return true
     }
 

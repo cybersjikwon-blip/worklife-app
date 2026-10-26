@@ -354,10 +354,13 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
     var lottoOptions: LottoOptions
         get() = runCatching { JSONObject(prefs.getString("lottoOpt", "{}")!!).let { o ->
             fun set(k: String) = o.optString(k).split(",").mapNotNull { it.trim().toIntOrNull() }.filter { it in 1..45 }.toSet()
-            LottoOptions(set("fixed"), set("exclude"), o.optBoolean("oe"), o.optBoolean("sum"), o.optInt("cons"), o.optBoolean("last"))
+            LottoOptions(set("fixed"), set("exclude"), o.optBoolean("oe"), o.optBoolean("sum"), o.optInt("cons"), o.optBoolean("last"),
+                o.optInt("hot", -1), o.optInt("cold", -1),
+                o.optString("zones").split(",").mapNotNull { it.trim().toIntOrNull() }.takeIf { it.size == 5 } ?: List(5) { -1 }, o.optInt("win", 50))
         } }.getOrDefault(LottoOptions())
         set(v) { prefs.edit().putString("lottoOpt", JSONObject().put("fixed", v.fixed.sorted().joinToString(",")).put("exclude", v.exclude.sorted().joinToString(","))
-            .put("oe", v.balanceOddEven).put("sum", v.sumRange).put("cons", v.maxConsecutive).put("last", v.avoidLastDraw).toString()).apply() }
+            .put("oe", v.balanceOddEven).put("sum", v.sumRange).put("cons", v.maxConsecutive).put("last", v.avoidLastDraw)
+            .put("hot", v.hotCount).put("cold", v.coldCount).put("zones", v.zones.joinToString(",")).put("win", v.statWindow).toString()).apply() }
 
     var cardPeople: List<CardPerson>
         get() = runCatching {

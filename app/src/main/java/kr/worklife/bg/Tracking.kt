@@ -136,6 +136,19 @@ object Scheduler {
     const val ACT_SETTLE = "kr.worklife.SETTLE"
     const val ACT_POLL = "kr.worklife.POLL"
     const val ACT_LUNCH = "kr.worklife.LUNCH"
+    const val ACT_PRESENCE = "kr.worklife.PRESENCE"
+    const val ACT_LOTTO = "kr.worklife.LOTTO"
+
+    /** 로또 결과 확인: 다음 토요일 21:00 (저장한 번호가 있을 때만 알림) */
+    fun scheduleLotto(ctx: Context, at: LocalDateTime? = null) {
+        val now = LocalDateTime.now()
+        val t = at ?: run {
+            var d = now.toLocalDate()
+            while (d.dayOfWeek != java.time.DayOfWeek.SATURDAY || !d.atTime(21, 0).isAfter(now)) d = d.plusDays(1)
+            d.atTime(21, 0)
+        }
+        set(ctx, t, pi(ctx, ACT_LOTTO, 6))
+    }
 
     private fun pi(ctx: Context, act: String, code: Int) = PendingIntent.getBroadcast(ctx, code,
         Intent(ctx, AlarmReceiver::class.java).setAction(act), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -175,7 +188,16 @@ object Scheduler {
             d.atTime(hm(c.lunchEnd)).plusMinutes(30).takeIf { it.isAfter(now) }
         }.firstOrNull()
         if (lunchNext != null) set(ctx, lunchNext, pi(ctx, ACT_LUNCH, 4))
+        // 출근 확인: 출근 1시간 뒤 · 점심 끝 20분 뒤 위치 1번씩 (하루 2번) → '회사 안' 기록이 비지 않게
+        val presNext = (0L..21L).asSequence().map { now.toLocalDate().plusDays(it) }.mapNotNull { d ->
+            val c = repo.companyOn(d) ?: return@mapNotNull null
+            if (!c.hasLocation || !HolidayCalendar(c).isWorkday(d)) return@mapNotNull null
+            listOf(d.atTime(hm(c.workStart)).plusMinutes(60), d.atTime(hm(c.lunchEnd)).plusMinutes(20))
+                .filter { it.isAfter(now) && it.toLocalTime().isBefore(hm(c.workEnd)) }.minOrNull()
+        }.firstOrNull()
+        if (presNext != null) set(ctx, presNext, pi(ctx, ACT_PRESENCE, 5))
         set(ctx, now.toLocalDate().plusDays(1).atTime(0, 10), pi(ctx, ACT_SETTLE, 2))
+        if (!(now.dayOfWeek == java.time.DayOfWeek.SATURDAY && now.hour in 21..23)) scheduleLotto(ctx) // 토요일 밤 재시도 예약은 덮어쓰지 않음
         ensure(ctx)
     }
 
@@ -290,6 +312,28 @@ class AlarmReceiver : BroadcastReceiver() {
         when (intent.action) {
             Scheduler.ACT_TRACK -> { Scheduler.ensure(ctx); runCatching { Geo.register(ctx) } } // 지오펜스가 지워졌을 때 대비 매일 재등록
             Scheduler.ACT_LUNCH -> runCatching { Engine.lunchReturnCheck(ctx) }
+            Scheduler.ACT_LOTTO -> {
+                val pr = goAsync()
+                Thread {
+                    runCatching { LottoResult.check(ctx) }
+                    runCatching { pr.finish() }
+                }.start()
+                return
+            }
+            Scheduler.ACT_PRESENCE -> {
+                // 근무 중 위치 1번 기록 (판정은 그대로, 기록만 남김)
+                val repo = Repo.get(ctx)
+                val c = repo.companyOn(java.time.LocalDate.now())
+                if (c != null && c.hasLocation && repo.day(java.time.LocalDate.now(), c.id) == null) {
+                    val pr = goAsync()
+                    val h = Handler(Looper.getMainLooper())
+                    var finished = false
+                    fun finish() { if (!finished) { finished = true; runCatching { Scheduler.scheduleAll(ctx) }; runCatching { pr.finish() } } }
+                    h.postDelayed({ finish() }, 25_000)
+                    Geo.current(ctx) { l -> if (l != null) runCatching { Tracker.onSample(ctx, l) }; finish() }
+                    return
+                }
+            }
             Scheduler.ACT_POLL -> {
                 if (!Scheduler.shouldTrackNow(ctx)) { Scheduler.cancelPoll(ctx); return }
                 // 서비스가 죽었어도 알람이 직접 위치를 잡아 판정 (평일은 서비스도 재시작)

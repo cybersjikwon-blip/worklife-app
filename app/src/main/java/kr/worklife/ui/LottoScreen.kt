@@ -113,7 +113,7 @@ fun LottoScreen(modifier: Modifier, onBack: () -> Unit) {
         }
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             when (tab) {
-                0 -> LottoGenerate(latest) { tab = 1 }
+                0 -> LottoGenerate(latest, draws) { tab = 1 }
                 1 -> LottoMine(draws, dataVer) { sync(Lotto.latestRound()) }
                 else -> LottoStats(draws, syncing, prog) { _ -> sync(Lotto.latestRound()) }
             }
@@ -142,7 +142,7 @@ fun Ball(n: Int, size: Dp = 36.dp, dim: Boolean = false, ring: Boolean = false) 
 
 /** 번호 생성: 게임 수, 고정·제외(번호판 터치), 조건 4가지 — 결과는 공이 하나씩 튀어나옴 */
 @Composable
-private fun LottoGenerate(latest: LottoDraw?, goMine: () -> Unit) {
+private fun LottoGenerate(latest: LottoDraw?, draws: List<LottoDraw>, goMine: () -> Unit) {
     val ctx = LocalContext.current
     val repo = Repo.get(ctx)
     val haptic = LocalHapticFeedback.current
@@ -154,6 +154,8 @@ private fun LottoGenerate(latest: LottoDraw?, goMine: () -> Unit) {
     var showOpt by remember { mutableStateOf(false) }
     var saved by remember { mutableStateOf(setOf<Int>()) }
     var msg by remember { mutableStateOf<String?>(null) }
+    // 핫(최근 많이 나온 15개) · 콜드(적게 나온 15개)
+    val hc = remember(draws, opt.statWindow) { Lotto.hotCold(draws, opt.statWindow) }
 
     SCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -161,7 +163,7 @@ private fun LottoGenerate(latest: LottoDraw?, goMine: () -> Unit) {
             (1..5).forEach { n -> FilterChip(games == n, { games = n }, label = { Text("$n") }, modifier = Modifier.padding(start = 4.dp)) }
         }
         Button(onClick = {
-            result = (0 until games).map { Lotto.generate(opt, latest) }
+            result = (0 until games).map { Lotto.generate(opt, latest, hot = hc.first, cold = hc.second) }
             roll++; saved = emptySet(); msg = null
             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
         }, Modifier.fillMaxWidth().padding(top = 12.dp).height(52.dp), shape = RoundedCornerShape(16.dp)) {
@@ -171,7 +173,9 @@ private fun LottoGenerate(latest: LottoDraw?, goMine: () -> Unit) {
             opt.fixed.takeIf { it.isNotEmpty() }?.let { "고정 ${it.sorted().joinToString(",")}" },
             opt.exclude.takeIf { it.isNotEmpty() }?.let { "제외 ${it.size}개" },
             if (opt.balanceOddEven) "홀짝 균형" else null, if (opt.sumRange) "합계 100~175" else null,
-            if (opt.maxConsecutive > 0) "연속 ${opt.maxConsecutive}개까지" else null, if (opt.avoidLastDraw) "지난 번호 빼기" else null)
+            if (opt.maxConsecutive > 0) "연속 ${opt.maxConsecutive}개까지" else null, if (opt.avoidLastDraw) "지난 번호 빼기" else null,
+            if (opt.hotCount >= 0 || opt.coldCount >= 0) "핫${if (opt.hotCount >= 0) opt.hotCount else "-"}·콜드${if (opt.coldCount >= 0) opt.coldCount else "-"}" else null,
+            if (opt.zones.any { it >= 0 }) "번호대 " + opt.zones.mapIndexedNotNull { i, z -> if (z >= 0) "${ZONE_NAMES[i]}$z" else null }.joinToString(" ") else null)
         TextButton(onClick = { showOpt = !showOpt }, contentPadding = PaddingValues(0.dp)) {
             Text((if (showOpt) "▲ 조건 접기" else "▼ 조건 설정") + (if (active.isEmpty()) " (완전 무작위)" else " · " + active.joinToString(" · ")), fontSize = 13.sp, maxLines = 1)
         }
@@ -188,6 +192,29 @@ private fun LottoGenerate(latest: LottoDraw?, goMine: () -> Unit) {
             SwitchRow("합계 100~175 (당첨의 약 70%)", opt.sumRange) { saveOpt(opt.copy(sumRange = it)) }
             SwitchRow("연속 번호 2개까지만", opt.maxConsecutive == 2) { saveOpt(opt.copy(maxConsecutive = if (it) 2 else 0)) }
             SwitchRow("지난 회차 당첨번호 빼기", opt.avoidLastDraw) { saveOpt(opt.copy(avoidLastDraw = it)) }
+            // 핫·콜드 조화
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("🔥 핫 · 🧊 콜드 조화", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                listOf(30, 50, 100).forEach { w -> FilterChip(opt.statWindow == w, { saveOpt(opt.copy(statWindow = w)) }, label = { Text("최근${w}", fontSize = 11.sp) }, modifier = Modifier.padding(start = 3.dp)) }
+            }
+            if (hc.first.isEmpty()) Text("당첨번호를 받으면 쓸 수 있어요", fontSize = 12.sp, color = OtOrange)
+            else Text("핫 ${hc.first.sorted().joinToString(" ")}\n콜드 ${hc.second.sorted().joinToString(" ")}", fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+            Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf("상관없음" to (-1 to -1), "핫 위주 4:1" to (4 to 1), "균형 2:2" to (2 to 2), "반반 3:3" to (3 to 3), "콜드 위주 1:4" to (1 to 4)).forEach { (l, v) ->
+                    FilterChip(opt.hotCount == v.first && opt.coldCount == v.second, { saveOpt(opt.copy(hotCount = v.first, coldCount = v.second)) }, label = { Text(l) })
+                }
+            }
+            CountRow("핫 개수", opt.hotCount) { saveOpt(opt.copy(hotCount = it)) }
+            CountRow("콜드 개수", opt.coldCount) { saveOpt(opt.copy(coldCount = it)) }
+            if (opt.hotCount >= 0 && opt.coldCount >= 0 && opt.hotCount + opt.coldCount > 6) Text("핫+콜드가 6개를 넘어서 가능한 만큼만 맞춰요", fontSize = 11.sp, color = OtOrange)
+            // 번호대 고르기
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            Text("🎯 번호대 고르기 (예: 1번대 2 + 40번대 2)", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            (0..4).forEach { z -> CountRow(ZONE_NAMES[z], opt.zones[z], max = if (z == 4) 6 else 6) { v -> saveOpt(opt.copy(zones = opt.zones.toMutableList().also { it[z] = v })) } }
+            val zsum = opt.zones.filter { it >= 0 }.sum()
+            if (zsum > 6) Text("번호대 합이 6을 넘어서 가능한 만큼만 맞춰요", fontSize = 11.sp, color = OtOrange)
             if (active.isNotEmpty()) TextButton(onClick = { saveOpt(LottoOptions()) }) { Text("조건 모두 해제") }
         }
     }
@@ -197,6 +224,8 @@ private fun LottoGenerate(latest: LottoDraw?, goMine: () -> Unit) {
                 Text("ABCDE"[gi].toString(), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f), modifier = Modifier.width(18.dp))
                 g.forEachIndexed { bi, n -> PopBall(n, roll, gi * 6 + bi); Spacer(Modifier.width(4.dp)) }
                 Spacer(Modifier.weight(1f))
+                if (hc.first.isNotEmpty()) Text("🔥${g.count { it in hc.first }}🧊${g.count { it in hc.second }}", fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f))
                 TextButton(onClick = {
                     repo.saveMyLotto(Lotto.nextRound(), listOf(g), "생성"); saved = saved + gi
                 }, enabled = gi !in saved, contentPadding = PaddingValues(horizontal = 6.dp)) { Text(if (gi in saved) "✓" else "저장") }
@@ -264,7 +293,13 @@ private fun LottoMine(draws: List<LottoDraw>, dataVer: Int, refresh: () -> Unit)
         msg?.let { Text(it, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 6.dp)) }
     }
     if (mine.isEmpty()) SCard { Text("저장한 번호가 없어요. [번호 생성]에서 저장하거나 산 용지의 QR을 스캔하세요.", fontSize = 14.sp) }
-    mine.groupBy { it.round }.forEach { (round, list) ->
+    // 🎫 구매(QR·직접 입력) / 생성해서 저장만 한 번호 구분
+    var onlyBought by remember { mutableStateOf(false) }
+    if (mine.isNotEmpty()) Row(Modifier.padding(horizontal = 18.dp, vertical = 2.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        FilterChip(!onlyBought, { onlyBought = false }, label = { Text("전체 ${mine.size}") })
+        FilterChip(onlyBought, { onlyBought = true }, label = { Text("🎫 구매한 번호 ${mine.count { it.src != "생성" }}") })
+    }
+    mine.filter { !onlyBought || it.src != "생성" }.groupBy { it.round }.forEach { (round, list) ->
         val d = byRound[round]
         SCard(pad = 16.dp) {
             val ranks = d?.let { dd -> list.map { Lotto.rank(it.nums, dd) } }
@@ -278,7 +313,8 @@ private fun LottoMine(draws: List<LottoDraw>, dataVer: Int, refresh: () -> Unit)
             })
             list.forEachIndexed { i, m ->
                 Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    m.nums.forEach { n -> Ball(n, 30.dp, dim = d != null && n !in d.nums && n != d.bonus, ring = d != null && n == d.bonus); Spacer(Modifier.width(3.dp)) }
+                    Text(if (m.src != "생성") "🎫" else "💭", fontSize = 13.sp, modifier = Modifier.width(22.dp))
+                    m.nums.forEach { n -> Ball(n, 28.dp, dim = d != null && n !in d.nums && n != d.bonus, ring = d != null && n == d.bonus); Spacer(Modifier.width(3.dp)) }
                     Spacer(Modifier.weight(1f))
                     ranks?.get(i)?.let { r -> Text(Lotto.rankLabel(r), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = if (r > 0) OkGreen else MaterialTheme.colorScheme.onSurface.copy(alpha = .45f)) }
                     TextButton(onClick = { repo.deleteMyLotto(m.id); ver++ }, contentPadding = PaddingValues(horizontal = 4.dp)) { Text("✕", color = MaterialTheme.colorScheme.onSurface.copy(alpha = .4f)) }
@@ -363,6 +399,26 @@ private fun StatRow(label: String, nums: List<Int>, sub: (Int) -> String) {
         nums.forEach { k ->
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(end = 8.dp)) {
                 Ball(k, 32.dp); Text(sub(k), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f))
+            }
+        }
+    }
+}
+
+private val ZONE_NAMES = listOf("1~9", "10번대", "20번대", "30번대", "40번대")
+
+/** 개수 고르기: [상관없음] 0 1 2 3 4 5 6 */
+@Composable
+private fun CountRow(label: String, value: Int, max: Int = 6, onPick: (Int) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, fontSize = 13.sp, modifier = Modifier.width(64.dp))
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            (listOf(-1) + (0..max)).forEach { v ->
+                val sel = value == v
+                Box(Modifier.height(28.dp).widthIn(min = 28.dp)
+                    .background(if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = .06f), RoundedCornerShape(50))
+                    .clickable { onPick(v) }.padding(horizontal = 9.dp), contentAlignment = Alignment.Center) {
+                    Text(if (v < 0) "상관없음" else "$v", fontSize = 12.sp, color = if (sel) Color.White else MaterialTheme.colorScheme.onSurface)
+                }
             }
         }
     }
