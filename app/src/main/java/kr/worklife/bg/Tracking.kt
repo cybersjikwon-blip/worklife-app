@@ -150,13 +150,13 @@ object Scheduler {
         set(ctx, t, pi(ctx, ACT_LOTTO, 6))
     }
 
-    private fun pi(ctx: Context, act: String, code: Int) = PendingIntent.getBroadcast(ctx, code,
+    internal fun pi(ctx: Context, act: String, code: Int) = PendingIntent.getBroadcast(ctx, code,
         Intent(ctx, AlarmReceiver::class.java).setAction(act), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
     fun canExact(ctx: Context): Boolean =
         Build.VERSION.SDK_INT < 31 || ctx.getSystemService(AlarmManager::class.java).canScheduleExactAlarms()
 
-    private fun set(ctx: Context, at: LocalDateTime, p: PendingIntent) {
+    internal fun set(ctx: Context, at: LocalDateTime, p: PendingIntent) {
         val am = ctx.getSystemService(AlarmManager::class.java)
         val ms = at.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
         try {
@@ -197,7 +197,8 @@ object Scheduler {
         }.firstOrNull()
         if (presNext != null) set(ctx, presNext, pi(ctx, ACT_PRESENCE, 5))
         set(ctx, now.toLocalDate().plusDays(1).atTime(0, 10), pi(ctx, ACT_SETTLE, 2))
-        if (!(now.dayOfWeek == java.time.DayOfWeek.SATURDAY && now.hour in 21..23)) scheduleLotto(ctx) // 토요일 밤 재시도 예약은 덮어쓰지 않음
+        if (!(now.dayOfWeek == java.time.DayOfWeek.SATURDAY && now.hour in 21..23)) scheduleLotto(ctx)
+        runCatching { TravelMode.scheduleAll(ctx) } // 토요일 밤 재시도 예약은 덮어쓰지 않음
         ensure(ctx)
     }
 
@@ -304,6 +305,37 @@ object Tracker {
         if (!Scheduler.shouldTrackNow(ctx)) { done(); return }
         Geo.current(ctx) { l -> if (l != null) runCatching { onSample(ctx, l) }; done() }
     }
+
+    /** '위치 확인' 결과 */
+    data class Check(val ok: Boolean, val error: String = "", val lat: Double = 0.0, val lon: Double = 0.0, val acc: Float = 0f,
+                     val time: java.time.LocalTime? = null, val distM: Double = -1.0, val place: String = "", val inside: Boolean = false,
+                     val radiusM: Double = 0.0, val hasCompany: Boolean = false)
+
+    /** 홈 '위치 확인': 시간과 상관없이 지금 위치를 잡아 결과를 돌려줌 (근무일이면 판정 기록에도 반영) */
+    fun checkNow(ctx: Context, cb: (Check) -> Unit) {
+        val main = Handler(Looper.getMainLooper())
+        if (!ctx.hasFineLoc()) { cb(Check(false, "위치 권한이 꺼져 있어요 (설정 > 권한)")); return }
+        val lm = ctx.getSystemService(LocationManager::class.java)
+        val gps = runCatching { lm.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)
+        val net = runCatching { lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false)
+        if (!gps && !net) { cb(Check(false, "휴대폰 위치(GPS)가 꺼져 있어요")); return }
+        var done = false
+        val timeout = Runnable { if (!done) { done = true; cb(Check(false, "위치를 못 잡았어요 (실내라면 창가에서 다시 시도해 주세요)")) } }
+        main.postDelayed(timeout, 25_000)
+        Geo.current(ctx) { l ->
+            main.post {
+                if (done) return@post
+                done = true; main.removeCallbacks(timeout)
+                if (l == null) { cb(Check(false, "위치를 못 잡았어요 (실내라면 창가에서 다시 시도해 주세요)")); return@post }
+                val c = Repo.get(ctx).activeCompany()
+                val near = c?.nearestPlace(l.latitude, l.longitude)
+                val d = near?.let { haversineM(it.lat, it.lon, l.latitude, l.longitude) } ?: -1.0
+                if (c != null && c.hasLocation) runCatching { onSample(ctx, l) }
+                cb(Check(true, "", l.latitude, l.longitude, l.accuracy, java.time.LocalTime.now().withNano(0), d, near?.name ?: "",
+                    c != null && d >= 0 && d <= c.radiusM + minOf(l.accuracy.toDouble(), 50.0), c?.radiusM ?: 0.0, c?.hasLocation == true))
+            }
+        }
+    }
 }
 
 class AlarmReceiver : BroadcastReceiver() {
@@ -312,6 +344,11 @@ class AlarmReceiver : BroadcastReceiver() {
         when (intent.action) {
             Scheduler.ACT_TRACK -> { Scheduler.ensure(ctx); runCatching { Geo.register(ctx) } } // 지오펜스가 지워졌을 때 대비 매일 재등록
             Scheduler.ACT_LUNCH -> runCatching { Engine.lunchReturnCheck(ctx) }
+            TravelMode.ACT_TRACK, TravelMode.ACT_DAY, TravelMode.ACT_MEMORY -> {
+                val pr = goAsync()
+                TravelMode.onAlarm(ctx, intent.action ?: "") { runCatching { pr.finish() } }
+                return
+            }
             Scheduler.ACT_LOTTO -> {
                 val pr = goAsync()
                 Thread {
@@ -425,11 +462,15 @@ object Geo {
         val c = Repo.get(ctx).activeCompany()
         if (c == null) { runCatching { LocationServices.getGeofencingClient(ctx).removeGeofences(pi) }; return } // 퇴사 상태: 감지 중지
         if (!c.hasLocation || !ctx.hasFineLoc() || !ctx.hasBgLoc()) return
-        val fence = Geofence.Builder().setRequestId("work-${c.id}")
-            .setCircularRegion(c.lat, c.lon, maxOf(100f, c.radiusM.toFloat()))
-            .setExpirationDuration(Geofence.NEVER_EXPIRE)
-            .setTransitionTypes(Geofence.GEOFENCE_TRANSITION_ENTER or Geofence.GEOFENCE_TRANSITION_EXIT).build()
-        val req = GeofencingRequest.Builder().setInitialTrigger(GeofencingRequest.INITIAL_TRIGGER_ENTER).addGeofence(fence).build()
+        // 근무지마다 하나씩 (본사 + 추가 근무지, 최대 20곳)
+        val b = GeofencingRequest.Builder().setInitialTrigger(GeofencingRequest.INITIAL_TRIGGER_ENTER)
+        c.allPlaces.take(20).forEachIndexed { i, p ->
+            b.addGeofence(Geofence.Builder().setRequestId("work-${c.id}-$i")
+                .setCircularRegion(p.lat, p.lon, maxOf(100f, c.radiusM.toFloat()))
+                .setExpirationDuration(Geofence.NEVER_EXPIRE)
+                .setTransitionTypes(Geofence.GEOFENCE_TRANSITION_ENTER or Geofence.GEOFENCE_TRANSITION_EXIT).build())
+        }
+        val req = b.build()
         try {
             val client = LocationServices.getGeofencingClient(ctx)
             client.removeGeofences(pi).addOnCompleteListener {

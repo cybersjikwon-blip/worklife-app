@@ -55,7 +55,7 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
     var assignCard by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf<String?>(null) }
-    var showN by remember { mutableIntStateOf(50) }
+    var showN by remember { mutableIntStateOf(30) }
 
     var pasting by remember { mutableStateOf(false) }
     fun runImport(label: String, job: () -> Pair<Int, Int>) {
@@ -107,16 +107,21 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
             // 연결 상태 + 최근 받은 카드 알림 기록 (합산이 안 될 때 원인 확인용)
             var open by remember { mutableStateOf(false) }
             val conn = CardIngest.connectedAt(ctx)
-            val log = remember(tick, version) { CardIngest.notiLog(ctx) }
+            var logDays by remember { mutableIntStateOf(1) }
+            val log = remember(tick, version, logDays) { CardIngest.notiLog(ctx, logDays) }
             SCard(pad = 16.dp, onClick = { open = !open }) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(if (conn > 0) "● 자동 합산 켜짐" else "● 알림 접근은 켜졌지만 아직 연결 전", fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
                         color = if (conn > 0) OkGreen else OtOrange, modifier = Modifier.weight(1f))
-                    Text(if (open) "접기" else "알림 기록 ${log.size}", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                    Text(if (open) "접기" else "알림 기록", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
                 }
                 if (conn > 0) Text("마지막 연결 " + java.time.Instant.ofEpochMilli(conn).atZone(java.time.ZoneId.systemDefault()).toLocalDateTime().let { "${it.monthValue}/${it.dayOfMonth} ${it.toLocalTime().hhmm()}" },
                     fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
                 if (open) {
+                    Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FilterChip(logDays == 1, { logDays = 1 }, label = { Text("오늘") })
+                        FilterChip(logDays == 7, { logDays = 7 }, label = { Text("최근 7일") })
+                    }
                     if (log.isEmpty()) Text("아직 받은 카드 알림이 없어요. 승인 문자가 왔는데도 여기 안 보이면 [다시 연결]을 누르거나 알림 접근을 껐다 켜 주세요.", fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
                     log.forEach { Text(it, fontSize = 11.sp, maxLines = 2, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .7f), modifier = Modifier.padding(top = 4.dp)) }
                     Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -231,6 +236,30 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
         SCard {
             val title = when (filter) { -2 -> "사용 내역"; -1 -> "미지정 내역"; else -> "${people.getOrNull(filter)?.name ?: ""} 내역" }
             CardTitle(title, trailing = { if (filter != -2) TextButton(onClick = { filter = -2 }) { Text("전체 보기") } })
+            // 보는 기간 (전체 보기일 때): 이번 달 / 지난 달 / 합산 기간 / 직접 지정 → 끝없이 나오지 않게
+            var listMode by remember { mutableStateOf("month") }
+            var listFrom by remember { mutableStateOf(today.withDayOfMonth(1)) }
+            var listTo by remember { mutableStateOf(today) }
+            val (lf, lt) = when (listMode) {
+                "last" -> today.minusMonths(1).withDayOfMonth(1).let { it to it.plusMonths(1).minusDays(1) }
+                "span" -> from to to
+                "custom" -> (if (listTo.isBefore(listFrom)) listTo to listFrom else listFrom to listTo)
+                else -> today.withDayOfMonth(1) to today
+            }
+            val listTxs = remember(version, tick, lf, lt) { repo.cardTxs(lf, lt) }
+            if (filter == -2) {
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("month" to "이번 달", "last" to "지난 달", "span" to "합산 기간", "custom" to "직접 지정").forEach { (k, l) ->
+                        FilterChip(listMode == k, { listMode = k; showN = 30 }, label = { Text(l) })
+                    }
+                }
+                if (listMode == "custom") Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { pickDate(ctx, listFrom) { listFrom = it } }, Modifier.weight(1f)) { Text("📅 ${listFrom.monthValue}/${listFrom.dayOfMonth}부터") }
+                    OutlinedButton(onClick = { pickDate(ctx, listTo) { listTo = it } }, Modifier.weight(1f)) { Text("📅 ${listTo.monthValue}/${listTo.dayOfMonth}까지") }
+                }
+                Text("${lf.monthValue}/${lf.dayOfMonth} ~ ${lt.monthValue}/${lt.dayOfMonth} 내역", fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f), modifier = Modifier.padding(vertical = 4.dp))
+            }
             // 검색 (가맹점·메모) + 메모 안 한 2만원 이상만 보기
             var q by remember { mutableStateOf("") }
             var onlyNoMemo by remember { mutableStateOf(false) }
@@ -238,7 +267,7 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
             OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), singleLine = true, placeholder = { Text("🔍 가맹점·메모 검색 (예: 주유, 거래처)") })
             if (noMemo > 0 || onlyNoMemo) FilterChip(onlyNoMemo, { onlyNoMemo = !onlyNoMemo },
                 label = { Text("✏️ 메모 안 한 2만원 이상 ${noMemo}건") }, modifier = Modifier.padding(top = 4.dp))
-            val shown = txs.filter { t ->
+            val shown = (if (filter == -2) listTxs else txs).filter { t ->
                 (q.isBlank() || t.merchant.contains(q.trim(), true) || t.memo.contains(q.trim(), true)) &&
                 (!onlyNoMemo || (t.needsMemo && t.memo.isBlank() && !t.excluded)) &&
                 when (filter) {
@@ -248,7 +277,20 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
                 }
             }
             if (shown.isEmpty()) Text(if (CardIngest.hasNotiAccess(ctx)) "이 기간 승인 내역이 없어요." else "알림 접근을 켜거나 아래에서 지난 내역을 불러오면 채워져요.", fontSize = 14.sp)
+            var lastDay: LocalDate? = null
+            val dayTotals = remember(shown) { shown.groupBy { it.ts.toLocalDate() }.mapValues { (_, l) -> l.filter { cardIncluded(it, people, bcOnly) }.let { it.size to it.sumOf { t -> t.amount } } } }
             shown.take(showN).forEach { t ->
+                // 날짜별 묶음 머리줄
+                val d = t.ts.toLocalDate()
+                if (d != lastDay) {
+                    lastDay = d
+                    val (n, sum) = dayTotals[d] ?: (0 to 0L)
+                    Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 2.dp)) {
+                        Text("${d.monthValue}월 ${d.dayOfMonth}일(${"월화수목금토일"[d.dayOfWeek.value - 1]})", fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                        Text("${n}건 · ${wonL(sum)}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f))
+                    }
+                    HorizontalDivider()
+                }
                 val inc = cardIncluded(t, people, bcOnly)
                 val who = matchPerson(t, people).let { if (it >= 0) people[it].name else if (inc) "미지정" else "합산 제외" }
                 Row(Modifier.fillMaxWidth().clickable { editTx = t }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -267,7 +309,7 @@ fun CardScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
                         color = when { !inc -> MaterialTheme.colorScheme.onSurface.copy(alpha = .4f); t.isCancel -> CancelRed; else -> MaterialTheme.colorScheme.onSurface })
                 }
             }
-            if (shown.size > showN) TextButton(onClick = { showN += 100 }) { Text("더 보기 (${shown.size - showN}건)") }
+            if (shown.size > showN) TextButton(onClick = { showN += 30 }) { Text("더 보기 (${shown.size - showN}건)") }
         }
 
         // ── 불러오기·설정

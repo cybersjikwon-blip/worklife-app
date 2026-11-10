@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <cache-path name="updates" path="updates/" />
+    <!-- 여행 사진 (카메라 촬영 저장·카톡 공유) -->
+    <files-path name="travel" path="travel/" />
+    <cache-path name="share" path="share/" />
 </paths>

@@ -134,6 +134,9 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
         // 휴일인데 회사에 머문 경우: 자동 기록 대신 제안 (나간 게 확인되면 그 시각까지)
         val tr = data.tracker
         val fi = tr?.firstInside; val li = tr?.lastInside
+        var addPlaceAsk by remember { mutableStateOf(false) }
+        var check by remember { mutableStateOf<Tracker.Check?>(null) }
+        var checking by remember { mutableStateOf(false) }
         val hEnd = tr?.checkout ?: li
         if (hol != null && data.rec == null && fi != null && hEnd != null && java.time.Duration.between(fi, hEnd).toMinutes() >= 30) SCard {
             val mins = java.time.Duration.between(fi, hEnd).toMinutes().toInt()
@@ -151,6 +154,40 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
                 }) { Text(if (left) "휴일근무로 기록" else "지금까지 휴일근무로 기록") }
                 OutlinedButton(onClick = goSettings) { Text("회사 위치 확인") }
             }
+        }
+        // 회사(근무지) 기록 없이 다른 곳에 계속 머무는 날: 자동 출퇴근 대신 물어보기
+        if (hol == null && data.rec == null && tr != null && tr.offsite && fi == null) SCard(color = MaterialTheme.colorScheme.tertiaryContainer, pad = 16.dp) {
+            Text("오늘은 회사가 아닌 곳에 계세요", fontWeight = FontWeight.SemiBold, color = OtOrange)
+            Text("근무지에서 ${"%.1f".format(tr.anchorFromCompanyM / 1000)}km 떨어진 곳 · 자동으로 출퇴근을 기록하지 않았어요. 어떻게 기록할까요?", fontSize = 14.sp)
+            Row(Modifier.padding(top = 10.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton(onClick = { Engine.recordOffsiteAsWork(ctx); bump() }) { Text("근무로 기록") }
+                OutlinedButton(onClick = { Engine.setFieldWork(ctx, true); bump() }) { Text("외근") }
+                OutlinedButton(onClick = { addPlaceAsk = true }) { Text("여기를 근무지로 추가") }
+            }
+        }
+        if (addPlaceAsk) {
+            var nm by remember { mutableStateOf("근무지 ${c.places.size + 2}") }
+            AlertDialog(onDismissRequest = { addPlaceAsk = false }, title = { Text("여기를 근무지로 추가") },
+                text = { Column {
+                    Text("지금 위치를 근무지로 추가해요. 앞으로 이곳에 있으면 출근으로 인정돼요 (회사 위치는 그대로).", fontSize = 14.sp)
+                    OutlinedTextField(nm, { nm = it }, label = { Text("이름") }, singleLine = true, modifier = Modifier.padding(top = 8.dp))
+                } },
+                confirmButton = { TextButton(onClick = {
+                    val name = nm.trim().ifBlank { "근무지" }
+                    addPlaceAsk = false
+                    Geo.current(ctx) { l ->
+                        val tt = tr
+                        val la = l?.latitude ?: tt?.anchorLat ?: 0.0; val lo = l?.longitude ?: tt?.anchorLon ?: 0.0
+                        if (la != 0.0 || lo != 0.0) {
+                            val cc = repo.currentCompany()
+                            repo.saveCompany(cc.copy(places = cc.places + WorkPlace(name, la, lo)))
+                            runCatching { Geo.register(ctx) }
+                            runCatching { Engine.checkToday(ctx) }
+                        }
+                        bump()
+                    }
+                }) { Text("추가") } },
+                dismissButton = { TextButton(onClick = { addPlaceAsk = false }) { Text("취소") } })
         }
         if (data.needCheck.isNotEmpty()) SCard(onClick = goRecords, pad = 16.dp) {
             Text("퇴근 확인이 필요한 날 ${data.needCheck.size}일", fontWeight = FontWeight.SemiBold, color = OtOrange)
@@ -277,7 +314,7 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
                 Triple("⏱", "퇴근 시각", { if (canAct) pickCheckout() }),
                 Triple("↩️", "퇴근 취소", { if (done && !field) { Engine.resumeWork(ctx); Tracker.oneShot(ctx) { bump() }; bump() } }),
                 Triple("🚗", if (field) "외근 취소" else "오늘 외근", { if (field) { Engine.setFieldWork(ctx, false); bump() } else if (data.rec == null && hol == null) { Engine.setFieldWork(ctx, true); bump() } }),
-                Triple("📍", "위치 확인", { Tracker.oneShot(ctx) { bump() }; bump() }),
+                Triple("📍", if (checking) "확인 중…" else "위치 확인", { if (!checking) { checking = true; Tracker.checkNow(ctx) { r -> checking = false; check = r; bump() } } }),
                 Triple("⚙️", "설정", goSettings))
         val pastel = listOf(0xFFE3F0FF, 0xFFFFF3C4, 0xFFEDE7FF, 0xFFDDF6F3, 0xFFFFE1D6, 0xFFFFE8F0, 0xFFE6F7EC, 0xFFE3F0FF, 0xFFFFF3C4, 0xFFEDE7FF)
         Column(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -295,6 +332,10 @@ fun HomeScreen(version: Int, bump: () -> Unit, modifier: Modifier, goSettings: (
             }
         }
 
+        check?.let { r -> LocationCheckDialog(r, c, { check = null }) { la, lo ->
+            // 회사 위치 바꾸기 (확인 후) — 되돌리기는 설정에서
+            repo.saveCompany(repo.currentCompany().copy(lat = la, lon = lo)); runCatching { Geo.register(ctx) }; check = null; bump()
+        } }
         // ── 한눈에 (가로로 넘기는 색 카드)
         Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 20.dp, top = 12.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("한눈에 보기", fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
@@ -479,4 +520,43 @@ private fun DayBar(c: Company, now: LocalDateTime, out: LocalTime?) {
             Text(c.workEnd + if (over > 0f) " +${hmShort(cur - en)}" else "", fontSize = 10.sp, color = Color.White.copy(alpha = .75f))
         }
     }
+}
+
+
+/** 홈 '위치 확인' 결과: 거리·반경 안/밖·정확도·지도 */
+@Composable
+fun LocationCheckDialog(r: Tracker.Check, c: Company, close: () -> Unit, setCompany: (Double, Double) -> Unit) {
+    val ctx = LocalContext.current
+    var confirm by remember { mutableStateOf(false) }
+    AlertDialog(onDismissRequest = close,
+        title = { Text(if (!r.ok) "위치 확인 실패" else if (!r.hasCompany) "지금 위치" else if (r.inside) "✅ 근무지 안이에요" else "📍 근무지 밖이에요") },
+        text = {
+            Column {
+                if (!r.ok) Text(r.error, fontSize = 14.sp)
+                else {
+                    if (r.hasCompany) {
+                        val dist = if (r.distM >= 1000) "%.1fkm".format(r.distM / 1000) else "%.0fm".format(r.distM)
+                        KV("가까운 근무지", r.place.ifBlank { c.name })
+                        KV("거리", dist, bold = true, color = if (r.inside) OkGreen else OtOrange)
+                        KV("인정 반경", "%.0fm".format(r.radiusM))
+                    } else Text("회사 위치가 아직 없어요", fontSize = 14.sp)
+                    KV("정확도", "±%.0fm".format(r.acc), color = if (r.acc > 100) OtOrange else Color.Unspecified)
+                    KV("확인 시각", r.time?.hhmm() ?: "-")
+                    if (r.acc > 100) Text("정확도가 낮아요. 창가나 밖에서 다시 확인해 보세요.", fontSize = 12.sp, color = OtOrange)
+                    if (confirm) Text("회사 위치를 지금 위치로 바꿀까요?" + (if (r.hasCompany && r.distM > 1000) " (지금 회사에서 %.1fkm 떨어진 곳이에요)".format(r.distM / 1000) else ""),
+                        fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp))
+                }
+            }
+        },
+        confirmButton = {
+            if (r.ok) Row {
+                if (confirm) TextButton(onClick = { setCompany(r.lat, r.lon) }) { Text("바꾸기") }
+                else TextButton(onClick = { confirm = true }) { Text("이 위치를 회사로") }
+                TextButton(onClick = {
+                    runCatching { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
+                        android.net.Uri.parse("geo:${r.lat},${r.lon}?q=${r.lat},${r.lon}(지금 위치)"))) }
+                }) { Text("지도") }
+            }
+        },
+        dismissButton = { TextButton(onClick = close) { Text("닫기") } })
 }

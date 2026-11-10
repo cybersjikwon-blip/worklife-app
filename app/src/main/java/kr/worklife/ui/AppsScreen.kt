@@ -20,12 +20,12 @@ import androidx.compose.ui.unit.sp
 data class MiniApp(val id: String, val icon: String, val name: String, val desc: String, val tint: Color, val ready: Boolean = true)
 
 val MINI_APPS = listOf(
+    MiniApp("travel", "✈️", "여행", "기록·사진·경비·지도", Color(0xFFDDF6F3)),
     MiniApp("lotto", "🎱", "로또", "번호 생성·QR 당첨확인·통계", Color(0xFFFFF3C4)),
     MiniApp("lunch", "🍱", "점심 룰렛", "오늘 뭐 먹지?", Color(0xFFFFE1D6)),
     MiniApp("wheel", "🎡", "돌림판", "내기·순서 정하기", Color(0xFFE3F0FF)),
     MiniApp("ladder", "🪜", "사다리", "2~8명 사다리타기", Color(0xFFE6F7EC)),
-    MiniApp("stock", "📈", "주식 시세", "관심종목·지수", Color(0xFFEDE7FF), ready = false),
-    MiniApp("bus", "🚌", "대중교통", "버스 도착 정보", Color(0xFFDDF6F3), ready = false),
+    MiniApp("bus", "🚌", "대중교통", "버스 도착 정보", Color(0xFFE3F0FF), ready = false),
     MiniApp("map", "🗺", "지도", "즐겨찾기·주변 검색", Color(0xFFFFE8F0), ready = false),
 )
 
@@ -34,6 +34,7 @@ val MINI_APPS = listOf(
 fun AppsScreen(modifier: Modifier, openApp: String?, setOpen: (String?) -> Unit) {
     when (openApp) {
         "lotto" -> { LottoScreen(modifier) { setOpen(null) }; return }
+        "travel" -> { TravelScreen(modifier) { setOpen(null) }; return }
         "lunch", "wheel", "ladder" -> {
             FunScreen(modifier, initial = listOf("lunch", "wheel", "ladder").indexOf(openApp)) { setOpen(null) }; return
         }

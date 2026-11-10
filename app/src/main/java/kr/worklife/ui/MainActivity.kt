@@ -75,6 +75,8 @@ class MainActivity : ComponentActivity() {
         Scheduler.scheduleAll(this)
         Geo.register(this)
         CardIngest.rebind(this) // 카드 알림 연결 다시 요청
+        runCatching { TravelMode.scheduleAll(this); TravelMode.showOngoing(this) } // 여행 중이면 알림 바로가기 유지
+        runCatching { Cloud.autoBackup(this) } // 로그인돼 있으면 하루 1번 서버 백업
     }
 
     private fun afterReady() {
@@ -103,6 +105,8 @@ class MainActivity : ComponentActivity() {
         val t = i?.getIntExtra("openTab", -1) ?: -1
         if (t < 0) return
         CardShare.memoTx = i?.getLongExtra("memoTx", -1L) ?: -1L
+        i?.getStringExtra("openApp")?.let { TravelNav.pendingApp.value = it }
+        i?.getStringExtra("travelAction")?.let { TravelNav.action = it }
         tab.intValue = t; forcedTabAt = System.currentTimeMillis()
         version.intValue++
     }
@@ -167,6 +171,9 @@ fun SplashScreen() {
 fun AppRoot(version: Int, tab: Int, setTab: (Int) -> Unit, bump: () -> Unit) {
     var month by remember { mutableStateOf(YearMonth.now()) }
     var openApp by remember { mutableStateOf<String?>(null) } // '앱' 탭에서 열린 미니앱
+    // 알림(여행 [기록]/[경비]/[사진])에서 미니앱 바로 열기
+    val pendingApp = TravelNav.pendingApp.value
+    LaunchedEffect(pendingApp) { if (pendingApp != null) { openApp = pendingApp; TravelNav.pendingApp.value = null } }
     val tabs = listOf("홈" to Icons.Filled.Home, "근무기록" to Icons.Filled.DateRange,
         "급여" to Icons.Filled.List, "카드" to Icons.Filled.ShoppingCart, "앱" to Icons.Filled.Star, "설정" to Icons.Filled.Settings)
     // 뒤로가기 상태: 홈에서 한 번 누르면 '대기', 대기 중 한 번 더 누르면 종료 (메시지 없음)
@@ -203,7 +210,7 @@ fun AppRoot(version: Int, tab: Int, setTab: (Int) -> Unit, bump: () -> Unit) {
     BackHandler(enabled = true) {
         val nowMs = System.currentTimeMillis()
         when {
-            tab == 4 && openApp != null -> openApp = null // 미니앱 → 앱 목록
+            tab == 4 && openApp != null -> { if (AppBack.handler?.invoke() != true) openApp = null } // 미니앱 안쪽 → 미니앱 → 앱 목록
             armed && nowMs - armedAt <= 2000 && tab == 0 -> { toast?.cancel(); act?.finish() }
             else -> {
                 if (tab != 0) setTab(0) // 다른 메뉴 → 홈으로 가면서 안내 (2초 안에 한 번 더 누르면 종료)

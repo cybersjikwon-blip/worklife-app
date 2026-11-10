@@ -390,16 +390,31 @@ class CoreTest {
         g.feedAll(inside("16:30") + smp("16:45", 8000.0, 400.0))
         assertTrue(g.checkout != null)
     }
-    @Test fun noInsideTodayUsesLocation() {
-        // 회사 안 기록 없이 17:30에 6km 밖 확인 → 이동 12분 빼서 17:18 퇴근(자동), 확인 요청 없음
+    @Test fun noInsideStayingAllDayIsNotCheckout() {
+        // 10/30 실제 사례: 회사 위치가 잘못 저장돼 하루 종일 35km 떨어진 같은 곳에서만 잡힘 → 퇴근 아님 + '회사가 아닌 곳' 표시
         val g = tr()
-        g.feedAll(listOf(smp("17:30", 6000.0, 20.0)))
-        assertEquals(at("17:18"), g.checkout)
-        assertTrue(!g.uncertain && g.noInsideToday)
-        assertEquals(Source.AUTO, g.finalize().second)
-        // 정시 직후 가까이서 확인되면 정시보다 앞당기지 않음
-        val h = tr(); h.feedAll(listOf(smp("15:02", 3000.0)))
-        assertEquals(at("15:00"), h.checkout)
+        g.feedAll(listOf(smp("11:02", 35112.0, 5.0), smp("13:30", 35117.0, 27.0), smp("16:37", 35086.0, 11.0), smp("16:41", 35084.0, 16.0),
+            smp("16:42", 35103.0, 16.0), smp("16:48", 35094.0, 5.0), smp("17:30", 35090.0, 8.0)))
+        assertNull(g.checkout); assertTrue(g.offsite); assertTrue(g.anchorFromCompanyM > 30_000)
+    }
+    @Test fun noInsideLeavingAnchorIsCheckout() {
+        // 회사 안 기록 없이 6km 지점에 머물다 17:20부터 떠남(2번·10분 이상 확인) → 이동시간 빼서 퇴근
+        val g = tr()
+        g.feedAll(listOf(smp("14:00", 6000.0), smp("16:00", 6020.0), smp("17:20", 9000.0), smp("17:31", 12000.0)))
+        assertEquals(at("17:14"), g.checkout); assertTrue(g.noInsideToday && g.offsite)
+        assertEquals(Source.NEEDS_CHECK, g.finalize().second)   // 근무지에서 먼 곳 → 자동 확정 안 하고 확인 요청
+        // 한 번 튄 위치(1번만 멀리)는 떠난 걸로 안 봄
+        val h = tr(); h.feedAll(listOf(smp("16:00", 6000.0), smp("17:20", 9000.0), smp("17:40", 6010.0), smp("18:00", 6005.0)))
+        assertNull(h.checkout)
+        // 오차 큰 위치는 기준으로 안 씀
+        val k = tr(); k.feedAll(listOf(smp("16:00", 6000.0, 300.0), smp("17:20", 9000.0, 400.0), smp("17:40", 12000.0, 500.0)))
+        assertNull(k.checkout)
+    }
+    @Test fun extraWorkPlaceCountsInside() {
+        val site = offsetPoint(WL.first, WL.second, northM = 20000.0)
+        val cc = c.copy(places = listOf(WorkPlace("남양주 현장", site.first, site.second)))
+        val g = tr(cc); g.feedAll(listOf(smp("10:00", 20030.0), smp("14:00", 20010.0), smp("16:00", 25000.0), smp("16:15", 26000.0)))
+        assertTrue(g.firstInside != null); assertTrue(g.checkout != null); assertTrue(!g.offsite)
     }
     @Test fun noInsideBeforeEndIgnored() {
         val g = tr()
@@ -598,5 +613,52 @@ class CoreTest {
         }
         // 불가능한 조합(핫 6 + 콜드 6)도 결과는 나옴
         assertEquals(6, Lotto.generate(LottoOptions(hotCount = 6, coldCount = 6), hot = hot, cold = cold).toSet().size)
+    }
+
+    // ── 21: 여행
+    private val T = Trip(1, "제주 가족여행", LocalDate.of(2026, 7, 10), LocalDate.of(2026, 7, 12), "가족", 4.5, tags = listOf("바다", "맛집"))
+    @Test fun travelBasics() {
+        assertEquals(2, T.nights); assertEquals(3, T.days().size); assertTrue(T.periodText.contains("2박 3일"))
+        assertEquals(listOf("바다", "캠핑"), Travel.tagsOf("좋았다 #바다 #캠핑 #바다"))
+        assertEquals("숙박", ExpenseCat.guess("제주신라호텔")); assertEquals("교통", ExpenseCat.guess("SK에너지 주유소"))
+        assertEquals("식비", ExpenseCat.guess("우진해장국 식당")); assertEquals("기타", ExpenseCat.guess("ABC상사"))
+    }
+    @Test fun travelExpensesAndCard() {
+        val tx = listOf(CardTx(id = 11, ts = LocalDateTime.of(2026, 7, 10, 12, 0), amount = 30000, merchant = "흑돼지 식당"),
+            CardTx(id = 12, ts = LocalDateTime.of(2026, 7, 11, 9, 0), amount = 120000, merchant = "OO호텔"),
+            CardTx(id = 13, ts = LocalDateTime.of(2026, 7, 20, 9, 0), amount = 5000, merchant = "기간 밖"))
+        val ex0 = listOf(Expense(1, 1, LocalDateTime.of(2026, 7, 10, 15, 0), "입장료", 10000, method = "현금"))
+        val cand = Travel.cardCandidates(T, tx, ex0, LocalDate.of(2026, 8, 1))
+        assertEquals(listOf(11L, 12L), cand.map { it.id })
+        val ex = ex0 + cand.map { Travel.fromCard(T, it) }
+        assertEquals(listOf(13L).size, Travel.cardCandidates(T, tx + tx[2].copy(id = 14, ts = LocalDateTime.of(2026, 7, 12, 1, 0)), ex, LocalDate.of(2026, 8, 1)).size)
+        val sm = Travel.summarize(ex + Travel.fromCard(T, tx[0]))   // 같은 카드 결제를 두 번 넣어도 1번만
+        assertEquals(160000L, sm.total); assertEquals(30000L, sm.byCat["식비"]); assertEquals(120000L, sm.byCat["숙박"]); assertEquals(10000L, sm.manual)
+    }
+    @Test fun travelTimelineRouteCourse() {
+        val sp = listOf(Spot(1, 1, SpotKind.FOOD, "흑돼지", LocalDateTime.of(2026, 7, 10, 12, 0), 33.5, 126.5, 4.0, 30000),
+            Spot(2, 1, SpotKind.SIGHT, "성산일출봉", LocalDateTime.of(2026, 7, 11, 6, 0), 33.46, 126.94),
+            Spot(3, 1, SpotKind.STAY, "OO호텔", LocalDateTime.of(2026, 7, 10, 20, 0), 33.49, 126.49))
+        val track = listOf(TrackPoint(1, LocalDateTime.of(2026, 7, 10, 10, 0), 33.5, 126.5), TrackPoint(1, LocalDateTime.of(2026, 7, 10, 10, 30), 33.5001, 126.5),
+            TrackPoint(1, LocalDateTime.of(2026, 7, 10, 11, 0), 33.51, 126.5))
+        val tl = Travel.timeline(T, sp, emptyList(), track, LocalDate.of(2026, 8, 1))
+        assertEquals(3, tl.size); assertEquals(listOf(1L, 3L), tl[0].entries.map { it.spot!!.id }); assertTrue(tl[0].km in 1.0..1.2)
+        val url = Travel.courseUrl(sp)!!
+        assertTrue(url.contains("origin=33.500000,126.500000") && url.contains("destination=33.460000,126.940000") && url.contains("waypoints=33.490000,126.490000"))
+        assertTrue(Travel.shareText(T, sp, emptyList()).contains("🍽 먹거리"))
+        assertTrue(Travel.mapJson(sp, track).contains("\"pins\":[{"))
+        assertTrue(!Travel.shouldTrack(track[0], 33.5003, 126.5, LocalDateTime.of(2026, 7, 10, 10, 20)))
+        assertTrue(Travel.shouldTrack(track[0], 33.5003, 126.5, LocalDateTime.of(2026, 7, 10, 12, 30)))
+    }
+    @Test fun travelSearchMemoryPhotos() {
+        val trips = listOf(T, Trip(2, "강릉 캠핑", LocalDate.of(2025, 11, 9), LocalDate.of(2025, 11, 10), tags = listOf("캠핑")))
+        val spots = mapOf(1L to listOf(Spot(1, 1, SpotKind.FOOD, "고기국수", LocalDateTime.of(2026, 7, 10, 12, 0), again = true)))
+        assertEquals(listOf(1L), Travel.search(trips, spots, "국수").map { it.id })
+        assertEquals(listOf(2L), Travel.search(trips, spots, "", tag = "캠핑").map { it.id })
+        assertEquals(listOf(1L), Travel.search(trips, spots, "", favOnly = true).map { it.id })
+        val m = Travel.onThisDay(trips, LocalDate.of(2026, 11, 10)); assertEquals(1, m.size); assertEquals(1, m[0].second)
+        val ph = listOf(Travel.PhotoInfo("a", LocalDateTime.of(2026, 7, 10, 12, 0), 33.5, 126.5), Travel.PhotoInfo("b", LocalDateTime.of(2026, 7, 10, 12, 20), 33.5005, 126.5),
+            Travel.PhotoInfo("c", LocalDateTime.of(2026, 7, 10, 15, 0), 33.6, 126.6), Travel.PhotoInfo("d", null, 0.0, 0.0))
+        assertEquals(listOf(2, 1), Travel.groupPhotos(ph).map { it.size })
     }
 }

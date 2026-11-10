@@ -31,6 +31,11 @@ object CardIngest {
         val tx = CardParser.parse(sender, body, at, repo.cardKeywords, source) ?: return "카드 승인 아님"
         val id = repo.addCardTxId(tx)
         if (id < 0) return "이미 있음"
+        // 여행 중이면 이 결제를 여행 경비에 자동 연결 (취소는 제외, 여행 화면에서 지우면 됨)
+        runCatching {
+            val t = repo.activeTrip()
+            if (t != null && tx.amount > 0 && t.contains(tx.ts.toLocalDate())) repo.saveExpense(kr.worklife.core.Travel.fromCard(t, tx.copy(id = id)))
+        }
         if (notify) runCatching { notifyAdded(ctx, tx.copy(id = id)) }
         return "추가"
     }
@@ -60,13 +65,23 @@ object CardIngest {
     fun markConnected(ctx: Context) { prefs(ctx).edit().putLong("notiConnectedAt", System.currentTimeMillis()).apply() }
     fun connectedAt(ctx: Context): Long = prefs(ctx).getLong("notiConnectedAt", 0L)
 
+    /** 카드 관련 알림 기록 (최근 7일만 보관). 한 줄 = "2026-11-10T12:30 [문자] 추가 · 내용" */
     fun logNoti(ctx: Context, pkg: String, text: String, result: String) {
         val app = when { pkg.contains("kakao") -> "카톡"; pkg.contains("messag") || pkg.contains("mms") -> "문자"; else -> pkg.substringAfterLast('.') }
-        val line = "${java.time.LocalTime.now().withNano(0).toString().take(5)} [$app] $result · " + text.replace("\n", " ").take(60)
-        val old = (prefs(ctx).getString("cardNotiLog", "") ?: "").lines().filter { it.isNotBlank() }.takeLast(14)
+        val now = LocalDateTime.now().withSecond(0).withNano(0)
+        val line = "$now [$app] $result · " + text.replace("\n", " ").take(60)
+        val keepFrom = now.minusDays(7).toString()
+        val old = (prefs(ctx).getString("cardNotiLog", "") ?: "").lines().filter { it.isNotBlank() && it.take(16) >= keepFrom.take(16) && it[4] == '-' }.takeLast(199)
         prefs(ctx).edit().putString("cardNotiLog", (old + line).joinToString("\n")).apply()
     }
-    fun notiLog(ctx: Context): List<String> = (prefs(ctx).getString("cardNotiLog", "") ?: "").lines().filter { it.isNotBlank() }.reversed()
+
+    /** 최근 days일 기록 (최신이 위) */
+    fun notiLog(ctx: Context, days: Int = 7): List<String> {
+        val from = LocalDateTime.now().toLocalDate().minusDays((days - 1).toLong()).atStartOfDay().toString().take(16)
+        return (prefs(ctx).getString("cardNotiLog", "") ?: "").lines()
+            .filter { it.length > 16 && it[4] == '-' && it.take(16) >= from }
+            .map { l -> l.substring(5, 16).replace('T', ' ').replace('-', '/') + l.substring(16) }.reversed()
+    }
 
     /** 앱을 열 때: 알림 접근이 켜져 있으면 연결을 다시 요청 (업데이트 후 연결이 끊기는 경우 대비) */
     fun rebind(ctx: Context) {

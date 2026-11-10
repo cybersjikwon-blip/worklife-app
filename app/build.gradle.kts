@@ -55,5 +55,14 @@ dependencies {
     implementation("com.google.mlkit:text-recognition-korean:16.0.1")
     // 로또 용지 QR 스캔 (구글 스캐너 화면, 카메라 권한 불필요)
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    // 서버(Firebase): 구글 로그인 + 기록 백업·동기화
+    implementation(platform("com.google.firebase:firebase-bom:33.5.1"))
+    implementation("com.google.firebase:firebase-auth")
+    implementation("com.google.firebase:firebase-firestore")
+    implementation("com.google.android.gms:play-services-auth:21.2.0")
     testImplementation("junit:junit:4.13.2")
 }
+
+// google-services.json(GitHub Secrets에서 빌드 때만 생성)이 있을 때만 Firebase 연결.
+// 없으면 서버 기능만 꺼진 채로 정상 빌드됨
+if (file("google-services.json").exists()) apply(plugin = "com.google.gms.google-services")

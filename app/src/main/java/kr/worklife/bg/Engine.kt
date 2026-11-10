@@ -42,6 +42,11 @@ object Engine {
         if (!HolidayCalendar(c).isWorkday(d)) return null
         val existing = repo.day(d, c.id)
         if (existing != null && existing.source == Source.MANUAL) return existing
+        // 오늘 회사(근무지) 안 기록 없이 먼 곳에만 있음 → 자동 출근·퇴근 처리 안 함, 한 번 물어봄 (마감 시 '확인 필요')
+        if (g.firstInside == null && g.offsite && existing == null && !now.toLocalTime().isAfter(hm(repo.settings.dayCutoff))) {
+            if (!now.isBefore(g.endDt.plusMinutes(30))) askOffsite(ctx, d, g)
+            return null
+        }
         val co = g.checkout ?: run {
             // 마감 시각 지남 → 강제 마감
             if (now.toLocalTime().isAfter(hm(repo.settings.dayCutoff))) g.finalize().first else return null
@@ -112,6 +117,26 @@ object Engine {
     fun confirmAll(ctx: Context, days: List<DayRecord>) {
         val repo = Repo.get(ctx)
         days.forEach { r -> repo.saveDay(r.copy(source = Source.MANUAL, note = (r.note.substringBefore(" / ") + " / 확인함").trim(' ', '/'))) }
+    }
+
+    /** '오늘 회사가 아닌 곳에 계셨어요' 알림 (하루 1번) */
+    private fun askOffsite(ctx: Context, d: LocalDate, g: GeofenceTracker) {
+        val p = ctx.getSharedPreferences("worklife", Context.MODE_PRIVATE)
+        val key = "offsiteAsked-$d"
+        if (p.getBoolean(key, false)) return
+        p.edit().putBoolean(key, true).apply()
+        Notif.post(ctx, 15, "오늘 회사가 아닌 곳에 계셨어요",
+            "근무지에서 ${"%.1f".format(g.anchorFromCompanyM / 1000)}km 떨어진 곳 · 앱에서 [근무로 기록] / [외근] / [여기를 근무지로 추가]를 골라 주세요")
+    }
+
+    /** 홈 '회사가 아닌 곳' 카드: 근무로 기록 (퇴근 = 떠난 시각 또는 지금/정시) */
+    fun recordOffsiteAsWork(ctx: Context, now: LocalDateTime = LocalDateTime.now()) {
+        val d = now.toLocalDate()
+        val (_, g, c) = evaluate(ctx, d)
+        c ?: return
+        val co = g?.checkout?.toLocalTime() ?: if (now.toLocalTime().isAfter(hm(c.workEnd))) now.toLocalTime() else hm(c.workEnd)
+        Repo.get(ctx).saveDay(DayRecord(d, c.id, Status.WORK, hm(c.workStart), co.withSecond(0).withNano(0), Source.MANUAL,
+            "회사가 아닌 곳에서 근무" + (g?.let { " (근무지에서 ${"%.1f".format(it.anchorFromCompanyM / 1000)}km)" } ?: "")))
     }
 
     const val FIELD_NOTE = "외근"

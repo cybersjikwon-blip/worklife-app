@@ -79,12 +79,21 @@ data class Company(
     val startConfirmed: Boolean = false,  // 최초 입사일을 사용자가 확인했는지 (앱을 재직 중간부터 쓰는 경우 대비)
     val annualBonus: Int = 0,             // 연간 상여금 (퇴직금 평균임금에 3/12 반영)
     val unusedLeavePay: Int = 0,          // 작년 미사용 연차수당 (3/12 반영)
+    // ── 근무지 여러 곳 (본사 외 현장·지점). 어느 곳이든 반경 안이면 '회사 안'
+    val places: List<WorkPlace> = emptyList(),
 ) {
+    /** 본사 + 추가 근무지 */
+    val allPlaces: List<WorkPlace> get() = (if (hasLocation) listOf(WorkPlace("본사", lat, lon)) else emptyList()) + places.filter { it.lat != 0.0 || it.lon != 0.0 }
+    /** 가장 가까운 근무지까지 거리(m) */
+    fun nearestM(la: Double, lo: Double): Double = allPlaces.minOfOrNull { haversineM(it.lat, it.lon, la, lo) } ?: Double.MAX_VALUE
+    fun nearestPlace(la: Double, lo: Double): WorkPlace? = allPlaces.minByOrNull { haversineM(it.lat, it.lon, la, lo) }
     fun inLunch(t: LocalTime) = !t.isBefore(hm(lunchStart)) && t.isBefore(hm(lunchEnd))
     val hasLocation get() = lat != 0.0 || lon != 0.0
     fun activeOn(d: LocalDate) = !d.isBefore(startDate) && (endDate == null || !d.isAfter(endDate))
     fun scheduledMin() = hm(workEnd).minOfDay() - hm(workStart).minOfDay() - lunchMin
 }
+
+data class WorkPlace(val name: String, val lat: Double, val lon: Double)
 
 /** 개인(공통) 설정 */
 data class AppSettings(
@@ -231,7 +240,7 @@ class GeofenceTracker(private val c: Company, private val s: AppSettings, val da
         return est.withSecond(0).withNano(0)
     }
 
-    fun distance(smp: LocSample) = haversineM(c.lat, c.lon, smp.lat, smp.lon)
+    fun distance(smp: LocSample) = c.nearestM(smp.lat, smp.lon)
 
     /**
      * 회사 안(true) / 밖(false) / 판단 보류(null)
@@ -255,13 +264,59 @@ class GeofenceTracker(private val c: Company, private val s: AppSettings, val da
     /** 실내 등에서 '회사 안'으로 인정할 수 있는 최대 오차 */
     private fun weakAccuracyM() = maxOf(s.maxAccuracyM * 3, c.radiusM * 1.5)
 
-    /** 오늘 회사 확인 기록 없이 정시 이후 밖에서만 잡힌 경우: 퇴근 시각을 알 수 없어 확인 요청 */
+    /** 오늘 회사 안 기록 없이 '머물던 곳'을 떠나는 것으로 퇴근을 판정했는지 */
     var noInsideToday = false; private set
+
+    // ── 회사 안 기록이 없는 날: '오늘 머문 곳(기준점)'을 실제로 떠날 때만 퇴근
+    //    (하루 종일 같은 곳에 있으면 회사 위치가 틀렸거나 다른 곳에서 일한 것 → 퇴근 아님)
+    var anchorLat = 0.0; private set
+    var anchorLon = 0.0; private set
+    private var anchorN = 0
+    private var leaveFirst: LocSample? = null
+    private var leaveCount = 0
+    /** 오늘 머문 곳이 회사(근무지)와 먼지 → 자동 처리하지 않고 물어봄 */
+    var offsite = false; private set
+    val hasAnchor get() = anchorN > 0
+    /** 오늘 머문 곳 ~ 가장 가까운 근무지 거리(m) */
+    val anchorFromCompanyM get() = if (anchorN == 0) 0.0 else c.nearestM(anchorLat, anchorLon)
+    private fun offsiteLimitM() = maxOf(1000.0, c.radiusM * 5)
+
+    private fun noInsideFeed(smp: LocSample) {
+        if (holiday || smp.accuracy > 100) { ignored++; return }  // 정확한 위치만 기준으로
+        if (anchorN == 0) { anchorLat = smp.lat; anchorLon = smp.lon; anchorN = 1; offsite = anchorFromCompanyM > offsiteLimitM(); return }
+        val dA = haversineM(anchorLat, anchorLon, smp.lat, smp.lon)
+        if (dA <= 300 + smp.accuracy) {
+            // 같은 곳에 계속 있음 → 기준점을 조금씩 보정, 떠남 후보 취소
+            val w = minOf(anchorN, 20).toDouble()
+            anchorLat = (anchorLat * w + smp.lat) / (w + 1); anchorLon = (anchorLon * w + smp.lon) / (w + 1); anchorN++
+            leaveFirst = null; leaveCount = 0
+            offsite = anchorFromCompanyM > offsiteLimitM()
+            return
+        }
+        val lf = leaveFirst ?: smp.also { leaveFirst = it }
+        leaveCount++
+        val mins = ChronoUnit.MINUTES.between(lf.ts, smp.ts)
+        if (leaveCount < 2 || mins < s.exitConfirmMin) return   // 2번 이상, 10분 이상 떨어져 확인돼야 '떠남'
+        if (smp.ts.isBefore(endDt)) {
+            // 근무시간 중 다른 곳으로 옮김 → 새 곳을 기준점으로
+            anchorLat = smp.lat; anchorLon = smp.lon; anchorN = 1; leaveFirst = null; leaveCount = 0
+            offsite = anchorFromCompanyM > offsiteLimitM()
+            return
+        }
+        val dFirst = haversineM(anchorLat, anchorLon, lf.lat, lf.lon)
+        val travel = kotlin.math.ceil(dFirst / 500.0).toLong().coerceIn(1, 90)
+        var est = lf.ts.minusMinutes(travel).withSecond(0).withNano(0)
+        if (est.isBefore(endDt)) est = endDt
+        noInsideToday = true; estimated = true
+        notes += "회사 안 기록 없음 → 머물던 곳(근무지에서 ${"%.1f".format(anchorFromCompanyM / 1000)}km)을 ${lf.ts.toLocalTime().hhmm()}쯤 떠남 → ${est.toLocalTime().hhmm()} 퇴근"
+        checkout = est
+    }
 
     /** [퇴근 취소 · 아직 근무 중]: 이 시각에 회사에 있는 것으로 보고 판정을 다시 시작 */
     fun resumeAt(t: LocalDateTime) {
         checkout = null; outSince = null; outFirst = null; outCount = 0
         estimated = false; uncertain = false; noInsideToday = false
+        leaveFirst = null; leaveCount = 0; offsite = false
         if (firstInside == null) firstInside = t
         lastInside = t
         notes += "퇴근 취소 ${t.toLocalTime().hhmm()} (근무 계속)"
@@ -291,26 +346,7 @@ class GeofenceTracker(private val c: Company, private val s: AppSettings, val da
             return null
         }
         val far = distance(smp) - smp.accuracy >= s.fastExitFor(c)
-        val li = lastInside ?: run {
-            // 오늘 회사 안 기록이 없는데 정시 이후 확실히 밖 → 위치 기준으로 퇴근 시각 추정
-            // (처음 밖으로 확인된 시각 − 이동시간(거리÷시속30km), 정시보다 이르면 정시) → 확인 요청 없이 자동 기록
-            if (!holiday && !smp.ts.isBefore(endDt)) {
-                if (outSince == null) { outSince = smp.ts; outFirst = smp }
-                outCount++
-                val away = ChronoUnit.MINUTES.between(outSince, smp.ts)
-                if (far || (outCount >= s.exitConfirmSamples && away >= s.exitConfirmMin)) {
-                    noInsideToday = true
-                    val of = outFirst ?: smp
-                    val travel = if (of.kind == "exit") 1L else kotlin.math.ceil(distance(of) / 500.0).toLong().coerceIn(1, 90)
-                    var est = of.ts.minusMinutes(travel).withSecond(0).withNano(0)
-                    if (est.isBefore(endDt)) est = endDt
-                    estimated = true
-                    notes += "회사 안 기록 없음 → ${of.ts.toLocalTime().hhmm()} 회사 밖(${(distance(of) / 1000).let { "%.1f".format(it) }}km) 확인 기준 ${est.toLocalTime().hhmm()} 퇴근"
-                    checkout = est
-                }
-            }
-            return checkout
-        }
+        val li = lastInside ?: run { noInsideFeed(smp); return checkout }
         if (outSince == null) { outSince = smp.ts; outFirst = smp }
         outCount++
         val away = ChronoUnit.SECONDS.between(outSince, smp.ts) / 60.0
@@ -339,6 +375,11 @@ class GeofenceTracker(private val c: Company, private val s: AppSettings, val da
 
     /** 하루 마감: (퇴근시각, 근거) */
     fun finalize(): Pair<LocalDateTime, Source> {
+        // 회사가 아닌 곳에서만 있었던 날 → 자동 확정하지 않고 확인 요청
+        if (lastInside == null && offsite) {
+            notes += "회사 안 기록 없음 · 근무지에서 ${"%.1f".format(anchorFromCompanyM / 1000)}km 떨어진 곳에 있었음 → 확인 필요"
+            return (checkout ?: endDt) to Source.NEEDS_CHECK
+        }
         checkout?.let { return it to (if (uncertain) Source.NEEDS_CHECK else Source.AUTO) }
         val li = lastInside ?: run { notes += "위치 기록 없음 → 정시 퇴근 처리"; return endDt to Source.DEFAULT }
         if (holiday) return (if (outSince != null) departure(li) else li) to (if (outSince != null && !uncertain) Source.AUTO else Source.NEEDS_CHECK)

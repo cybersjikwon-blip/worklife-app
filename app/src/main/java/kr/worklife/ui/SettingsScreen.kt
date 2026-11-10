@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kr.worklife.bg.*
 import kr.worklife.core.*
+import androidx.compose.foundation.horizontalScroll
 import kr.worklife.data.Repo
 import java.time.LocalDate
 
@@ -40,6 +41,8 @@ fun SettingsScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
         CompanyHistoryCard(companies, company, onEdit = { editId = it }, bump = bump, onNew = { editId = it })
 
         key(version) { PersonalForm(bump) }
+        CloudCard(bump)
+        BackupCard(bump)
         VoiceCard()
         WidgetCard()
         UpdateCard(version, bump)
@@ -54,6 +57,93 @@ fun SettingsScreen(version: Int, bump: () -> Unit, modifier: Modifier) {
         Spacer(Modifier.height(24.dp))
     }
 
+}
+
+/** 서버(Firebase): 구글 로그인 · 자동 백업 · 복원 */
+@Composable
+private fun CloudCard(bump: () -> Unit) {
+    val ctx = LocalContext.current
+    var ver by remember { mutableIntStateOf(0) }
+    val email = remember(ver) { Cloud.email(ctx) }
+    var busy by remember { mutableStateOf(false) }
+    var msg by remember { mutableStateOf<String?>(null) }
+    var askRestore by remember { mutableStateOf<String?>(null) }
+    val main = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
+    fun bg(label: String, job: () -> String, after: (String) -> Unit = {}) {
+        busy = true; msg = label
+        Thread { val r = runCatching(job).getOrElse { "실패: ${it.message}" }; main.post { busy = false; msg = r; ver++; after(r) } }.start()
+    }
+    val login = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) { r ->
+        busy = true; msg = "로그인 중…"
+        Cloud.onSignInResult(ctx, r.data) { err ->
+            busy = false; ver++
+            if (err != null) msg = err
+            else bg("서버 백업 확인 중…", {
+                // 새 폰이면(이 폰에 기록이 거의 없고 서버에 백업이 있으면) 복원을 먼저 물어봄
+                val info = Cloud.remoteInfo(ctx)
+                val local = runCatching { Repo.get(ctx).trips().size + Repo.get(ctx).cardTxCount() }.getOrDefault(0)
+                if (info != null && local < 5) "ASK:${info.first.take(16).replace('T', ' ')} · ${"%,d".format(info.second)}건" else Cloud.backup(ctx)
+            }) { res -> if (res.startsWith("ASK:")) { askRestore = res.removePrefix("ASK:"); msg = "로그인했어요" } }
+        }
+    }
+    SCard {
+        CardTitle("서버 백업 ☁️")
+        if (email == null) {
+            Text("구글 계정으로 로그인하면 근무기록·급여·카드·로또·여행 기록이 서버에 매일 자동 백업돼요. 폰을 바꿔도 로그인만 하면 그대로 복원돼요.", fontSize = 13.sp)
+            Button(onClick = {
+                val (i, err) = Cloud.signInIntent(ctx)
+                if (i != null) runCatching { login.launch(i) }.onFailure { msg = "로그인 화면을 열 수 없어요" } else msg = err
+            }, enabled = !busy, modifier = Modifier.padding(top = 8.dp)) { Text("구글 계정으로 로그인") }
+        } else {
+            Text("● $email", fontWeight = FontWeight.SemiBold, color = OkGreen)
+            val last = Cloud.lastBackup(ctx)
+            Text(if (last.isBlank()) "아직 백업 전" else "마지막 백업 ${last.take(16).replace('T', ' ')} · 앱을 열 때 하루 1번 자동", fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .6f))
+            Row(Modifier.padding(top = 8.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton(onClick = { bg("백업 중…", { Cloud.backup(ctx) }) }, enabled = !busy) { Text("지금 백업") }
+                OutlinedButton(onClick = { bg("서버 백업 확인 중…", { Cloud.remoteInfo(ctx)?.let { "ASK:${it.first.take(16).replace('T', ' ')} · ${"%,d".format(it.second)}건" } ?: "서버에 백업이 없어요" }) { r ->
+                    if (r.startsWith("ASK:")) { askRestore = r.removePrefix("ASK:"); msg = null } } }, enabled = !busy) { Text("서버에서 복원") }
+                TextButton(onClick = { Cloud.signOut(ctx); ver++; msg = "로그아웃했어요" }, enabled = !busy) { Text("로그아웃") }
+            }
+            Text("사진은 폰에 저장돼요 → 아래 [내보내기 백업]으로 함께 보관하세요.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f))
+        }
+        msg?.let { Text(it, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 6.dp)) }
+    }
+    askRestore?.let { info ->
+        AlertDialog(onDismissRequest = { askRestore = null }, title = { Text("서버 백업으로 복원할까요?") },
+            text = { Text("$info 백업이 있어요.\n복원하면 이 폰의 기록이 서버 백업 내용으로 바뀌어요.") },
+            confirmButton = { TextButton(onClick = { askRestore = null; bg("복원 중…", { Cloud.restore(ctx) }) { bump() } }) { Text("복원") } },
+            dismissButton = { TextButton(onClick = { askRestore = null; bg("백업 중…", { Cloud.backup(ctx) }) }) { Text("아니요, 이 폰 기록을 백업") } })
+    }
+}
+
+/** 내보내기 백업 (사진 포함 zip) · 가져오기 */
+@Composable
+private fun BackupCard(bump: () -> Unit) {
+    val ctx = LocalContext.current
+    var msg by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var confirm by remember { mutableStateOf<android.net.Uri?>(null) }
+    val main = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
+    val exp = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/zip")) { u ->
+        if (u != null) { busy = true; msg = "내보내는 중…"; Thread { val r = Backup.export(ctx, u); main.post { busy = false; msg = r } }.start() }
+    }
+    val imp = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { u -> if (u != null) confirm = u }
+    SCard {
+        CardTitle("내보내기 백업 💾")
+        Text("기록 전체 + 여행 사진을 zip 파일 하나로 저장해요. 구글 드라이브·카톡·PC 등에 보관하고, 새 폰에서 [가져오기]로 복원하세요.", fontSize = 13.sp)
+        Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilledTonalButton(onClick = { runCatching { exp.launch("슬기로운직장생활_백업_${LocalDate.now()}.zip") } }, enabled = !busy) { Text("내보내기") }
+            OutlinedButton(onClick = { runCatching { imp.launch(arrayOf("application/zip", "application/octet-stream", "*/*")) } }, enabled = !busy) { Text("가져오기") }
+        }
+        msg?.let { Text(it, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 6.dp)) }
+    }
+    confirm?.let { u ->
+        AlertDialog(onDismissRequest = { confirm = null }, title = { Text("백업 파일로 복원할까요?") },
+            text = { Text("이 폰의 기록이 백업 파일 내용으로 바뀌어요.") },
+            confirmButton = { TextButton(onClick = { confirm = null; busy = true; msg = "복원 중…"; Thread { val r = Backup.restore(ctx, u); main.post { busy = false; msg = r; bump() } }.start() }) { Text("복원") } },
+            dismissButton = { TextButton(onClick = { confirm = null }) { Text("취소") } })
+    }
 }
 
 /** 퇴근 음성: 켜기 / 진동 모드에서도 재생 / 테스트 */
@@ -281,18 +371,89 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
         if (end != null) TextButton(onClick = { end = null }) { Text("퇴사일 지우기") }
 
         Text("근무지 위치", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
-        Button(onClick = {
-            if (!ctx.hasFineLoc()) { Toast.makeText(ctx, "아래 '권한 점검'에서 위치 권한을 먼저 허용하세요", Toast.LENGTH_LONG).show(); return@Button }
-            locating = true
-            Geo.current(ctx) { l ->
-                locating = false
-                if (l == null) Toast.makeText(ctx, "위치를 못 잡았어요. GPS를 켜고 실외/창가에서 다시 시도하세요", Toast.LENGTH_LONG).show()
-                else {
-                    lat = "%.6f".format(l.latitude); lon = "%.6f".format(l.longitude)
-                    Toast.makeText(ctx, "현재 위치(오차 ${l.accuracy.toInt()}m)를 넣었어요. 저장을 눌러주세요", Toast.LENGTH_LONG).show()
+        // 지금 위치 → 확인 창을 거쳐야만 바뀜 (실수로 눌러도 자동저장되지 않게)
+        var pending by remember { mutableStateOf<android.location.Location?>(null) }
+        var undo by remember { mutableStateOf<Pair<Double, Double>?>(null) }
+        var addPlace by remember { mutableStateOf<android.location.Location?>(null) }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = {
+                if (!ctx.hasFineLoc()) { Toast.makeText(ctx, "아래 '권한 점검'에서 위치 권한을 먼저 허용하세요", Toast.LENGTH_LONG).show(); return@Button }
+                locating = true
+                Geo.current(ctx) { l ->
+                    locating = false
+                    if (l == null) Toast.makeText(ctx, "위치를 못 잡았어요. GPS를 켜고 실외/창가에서 다시 시도하세요", Toast.LENGTH_LONG).show()
+                    else pending = l
+                }
+            }, enabled = !locating) { Text(if (locating) "위치 찾는 중…" else "지금 위치를 회사로") }
+            undo?.let { u ->
+                OutlinedButton(onClick = {
+                    val cur = repo.companies.firstOrNull { it.id == c.id } ?: c
+                    repo.saveCompany(cur.copy(lat = u.first, lon = u.second))
+                    lat = "%.6f".format(u.first); lon = "%.6f".format(u.second); undo = null
+                    runCatching { repo.reapplyCompany(repo.companies.first { it.id == c.id }); Engine.settlePast(ctx); Engine.checkToday(ctx) }
+                    Scheduler.scheduleAll(ctx); Geo.register(ctx)
+                    Toast.makeText(ctx, "회사 위치를 이전 위치로 되돌렸어요", Toast.LENGTH_LONG).show(); bump()
+                }) { Text("되돌리기") }
+            }
+        }
+        pending?.let { l ->
+            val cur = repo.companies.firstOrNull { it.id == c.id } ?: c
+            val far = if (cur.hasLocation) haversineM(cur.lat, cur.lon, l.latitude, l.longitude) else -1.0
+            AlertDialog(onDismissRequest = { pending = null },
+                title = { Text("회사 위치를 여기로 바꿀까요?") },
+                text = {
+                    Text((if (far >= 0) "지금 위치는 기존 회사 위치에서 " + (if (far >= 1000) "${"%.1f".format(far / 1000)}km" else "${far.toInt()}m") + " 떨어진 곳이에요.\n" else "") +
+                        "위치 오차 ±${l.accuracy.toInt()}m\n\n출장·현장처럼 가끔 가는 곳이면 [근무지로 추가]를 고르세요 (회사 위치는 그대로).")
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        if (cur.hasLocation) undo = cur.lat to cur.lon
+                        repo.saveCompany(cur.copy(lat = l.latitude, lon = l.longitude))
+                        lat = "%.6f".format(l.latitude); lon = "%.6f".format(l.longitude); pending = null
+                        runCatching { repo.reapplyCompany(repo.companies.first { it.id == c.id }); Engine.settlePast(ctx); Engine.checkToday(ctx) }
+                        Scheduler.scheduleAll(ctx); Geo.register(ctx)
+                        Toast.makeText(ctx, "회사 위치를 바꿨어요 (잘못 바꿨으면 [되돌리기])", Toast.LENGTH_LONG).show(); bump()
+                    }) { Text("바꾸기") }
+                },
+                dismissButton = {
+                    Row {
+                        TextButton(onClick = { addPlace = l; pending = null }) { Text("근무지로 추가") }
+                        TextButton(onClick = { pending = null }) { Text("취소") }
+                    }
+                })
+        }
+        // 추가 근무지 (현장·지점) — 어느 곳이든 반경 안이면 '회사 안'
+        val curC = repo.companies.firstOrNull { it.id == c.id } ?: c
+        if (curC.places.isNotEmpty()) {
+            Text("추가 근무지 ${curC.places.size}곳", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
+            curC.places.forEachIndexed { i, p ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("📍 ${p.name}" + (if (curC.hasLocation) " · 본사에서 ${"%.1f".format(haversineM(curC.lat, curC.lon, p.lat, p.lon) / 1000)}km" else ""),
+                        fontSize = 13.sp, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:${p.lat},${p.lon}?q=${p.lat},${p.lon}(${Uri.encode(p.name)})"))) } }) { Text("지도") }
+                    TextButton(onClick = {
+                        repo.saveCompany(curC.copy(places = curC.places.filterIndexed { j, _ -> j != i })); Geo.register(ctx); bump()
+                    }) { Text("삭제") }
                 }
             }
-        }, enabled = !locating) { Text(if (locating) "위치 찾는 중…" else "지금 위치를 회사로") }
+        }
+        TextButton(onClick = {
+            if (!ctx.hasFineLoc()) { Toast.makeText(ctx, "위치 권한을 먼저 허용하세요", Toast.LENGTH_LONG).show(); return@TextButton }
+            Geo.current(ctx) { l -> if (l == null) Toast.makeText(ctx, "위치를 못 잡았어요", Toast.LENGTH_LONG).show() else addPlace = l }
+        }) { Text("+ 지금 위치를 근무지로 추가 (현장·지점)") }
+        addPlace?.let { l ->
+            var pn by remember { mutableStateOf("근무지 ${curC.places.size + 1}") }
+            AlertDialog(onDismissRequest = { addPlace = null }, title = { Text("근무지 추가") },
+                text = { Column { Field("이름", pn, { pn = it }, hint = "예: 남양주 현장"); Text("오차 ±${l.accuracy.toInt()}m · 반경은 회사와 같아요", fontSize = 12.sp) } },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val cc = repo.companies.firstOrNull { it.id == c.id } ?: c
+                        repo.saveCompany(cc.copy(places = cc.places + WorkPlace(pn.ifBlank { "근무지" }, l.latitude, l.longitude)))
+                        addPlace = null; Geo.register(ctx); Toast.makeText(ctx, "근무지를 추가했어요", Toast.LENGTH_SHORT).show(); bump()
+                    }) { Text("추가") }
+                },
+                dismissButton = { TextButton(onClick = { addPlace = null }) { Text("취소") } })
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Field("위도", lat, { lat = it }, number = true, modifier = Modifier.weight(1f))
             Field("경도", lon, { lon = it }, number = true, modifier = Modifier.weight(1f))
@@ -421,19 +582,24 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
                 annualLeaveDays = if (leaveAuto) -1 else leaveDays.toIntOrNull()?.coerceIn(0, 60) ?: 15,
                 leaveBasis = leaveBasis, leaveCarryover = carry.toDoubleOrNull()?.coerceIn(0.0, 60.0) ?: 0.0,
                 lunchStart = lunchS.hhmm(), lunchEnd = lunchE.hhmm(), lunchOverDeduct = lunchDed,
-                startConfirmed = c.startConfirmed || start != c.startDate)
+                startConfirmed = c.startConfirmed || start != c.startDate,
+                places = (repo.companies.firstOrNull { it.id == c.id } ?: c).places)
         }
 
         /** 저장 + 근무시간·휴일이 바뀌었으면 근무기록을 새 기준으로 다시 맞춤 */
         fun save(auto: Boolean): Boolean {
             val err = mutableListOf<String>()
-            val nc = build(err)
+            val nc0 = build(err)
             if (err.isNotEmpty()) {
                 Toast.makeText(ctx, (if (auto) "설정이 저장되지 않았어요 · " else "확인 필요: ") + err.joinToString(", "), Toast.LENGTH_LONG).show()
                 return false
             }
             // 이미 저장된 값과 같으면 아무것도 안 함 (중복 저장·중복 안내 방지)
             val cur = repo.companies.firstOrNull { it.id == c.id } ?: c
+            // 자동 저장(다른 탭으로 이동·앱 종료)에서는 회사 위치를 바꾸지 않음 → 위치는 [지금 위치를 회사로] 확인 창이나 [저장] 버튼으로만
+            val locSkipped = auto && (nc0.lat != cur.lat || nc0.lon != cur.lon)
+            val nc = if (auto) nc0.copy(lat = cur.lat, lon = cur.lon) else nc0
+            if (locSkipped) Toast.makeText(ctx, "직접 입력한 위도·경도는 [저장]을 눌러야 바뀌어요", Toast.LENGTH_LONG).show()
             if (nc == cur) return true
             repo.saveCompany(nc)
             val scheduleChanged = nc.workStart != cur.workStart || nc.workEnd != cur.workEnd || nc.lunchMin != cur.lunchMin ||
@@ -452,7 +618,7 @@ private fun CompanyForm(c: Company, bump: () -> Unit) {
             return true
         }
 
-        val dirty = runCatching { build(mutableListOf()) != c }.getOrDefault(true)
+        val dirty = runCatching { build(mutableListOf()) != (repo.companies.firstOrNull { it.id == c.id } ?: c) }.getOrDefault(true)
         // 저장 안 하고 다른 탭으로 가면 자동 저장 (근무시간만 바꾸고 저장을 깜빡하는 경우 대비)
         val latestSave = rememberUpdatedState({ if (dirty) save(auto = true) })
         DisposableEffect(Unit) { onDispose { latestSave.value() } }

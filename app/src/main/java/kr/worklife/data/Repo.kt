@@ -16,7 +16,7 @@ import java.time.YearMonth
 data class PayHistory(val ym: YearMonth, val companyId: Long, val companyName: String,
                       val gross: Int, val deduct: Int, val net: Int, val kind: String, val lines: List<PayLine>)
 
-class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.db", null, 5) {
+class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.db", null, 6) {
     private val prefs = ctx.getSharedPreferences("worklife", Context.MODE_PRIVATE)
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -26,6 +26,19 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
         db.execSQL("CREATE TABLE payslips(ym TEXT, company INTEGER, json TEXT, kind TEXT, saved_at TEXT, PRIMARY KEY(ym, company))")
         createCards(db)
         createLotto(db)
+        runCatching { db.execSQL("ALTER TABLE lotto_my ADD COLUMN ticket TEXT") }
+        createTravel(db)
+    }
+
+    /** v6: 여행 (여행 · 장소 · 경비 · 자동 경로) */
+    private fun createTravel(db: SQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS trips(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, start TEXT, end_d TEXT, companions TEXT, rating REAL, fav INTEGER, tags TEXT, memo TEXT, active INTEGER, cover TEXT)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS spots(id INTEGER PRIMARY KEY AUTOINCREMENT, trip INTEGER, kind TEXT, name TEXT, ts TEXT, lat REAL, lon REAL, rating REAL, price INTEGER, menu TEXT, memo TEXT, again INTEGER, photos TEXT, stay_type TEXT, nights INTEGER, booking TEXT, revisit INTEGER, transport TEXT)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS texp(id INTEGER PRIMARY KEY AUTOINCREMENT, trip INTEGER, ts TEXT, cat TEXT, amount INTEGER, memo TEXT, card_tx INTEGER, method TEXT)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS ttrack(trip INTEGER, ts TEXT, lat REAL, lon REAL)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_spots ON spots(trip)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_texp ON texp(trip)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_ttrack ON ttrack(trip, ts)")
     }
 
     private fun createLotto(db: SQLiteDatabase) {
@@ -47,6 +60,8 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
         if (o < 4) runCatching { createCards(db) }
         // v5: 카드 메모 + 로또
         if (o < 5) { runCatching { db.execSQL("ALTER TABLE cards ADD COLUMN memo TEXT") }; runCatching { createLotto(db) } }
+        // v6: 로또 용지 묶음 + 여행
+        if (o < 6) { runCatching { db.execSQL("ALTER TABLE lotto_my ADD COLUMN ticket TEXT") }; runCatching { createTravel(db) } }
     }
 
     // ───────── 설정 ─────────
@@ -335,21 +350,126 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
 
     fun drawRounds(): Set<Int> = readableDatabase.rawQuery("SELECT round FROM lotto_draws", null).use { c -> buildSet { while (c.moveToNext()) add(c.getInt(0)) } }
 
-    data class MyLotto(val id: Long, val round: Int, val nums: List<Int>, val created: String, val src: String)
+    /** ticket = 용지 1장(QR) 또는 저장 1번 단위 묶음 */
+    data class MyLotto(val id: Long, val round: Int, val nums: List<Int>, val created: String, val src: String, val ticket: String) {
+        /** 예전 기록(ticket 없음)은 같은 출처·같은 저장 시각끼리 한 묶음 */
+        val group get() = ticket.ifBlank { "$src|$created" }
+    }
 
-    fun saveMyLotto(round: Int, games: List<List<Int>>, src: String) {
+    /** @return 새로 저장된 게임 수 (같은 용지를 다시 스캔하면 0) */
+    fun saveMyLotto(round: Int, games: List<List<Int>>, src: String, ticket: String = ""): Int {
         val now = LocalDateTime.now().withNano(0).toString()
-        val existing = myLotto().filter { it.round == round }.map { it.nums }.toSet()
-        games.filter { it.sorted() !in existing }.forEach { g ->
-            writableDatabase.insert("lotto_my", null, ContentValues().apply { put("round", round); put("nums", g.sorted().joinToString(",")); put("created", now); put("src", src) })
+        val key = ticket.ifBlank { "$src|$now" }
+        val existing = myLotto().filter { it.round == round && it.group == key }.map { it.nums }.toSet()
+        var n = 0
+        games.map { it.sorted() }.filter { it !in existing }.forEach { g ->
+            writableDatabase.insert("lotto_my", null, ContentValues().apply {
+                put("round", round); put("nums", g.joinToString(",")); put("created", now); put("src", src); put("ticket", key)
+            }); n++
         }
+        return n
     }
 
-    fun myLotto(): List<MyLotto> = readableDatabase.rawQuery("SELECT id, round, nums, created, src FROM lotto_my ORDER BY round DESC, id ASC", null).use { c ->
-        buildList { while (c.moveToNext()) runCatching { add(MyLotto(c.getLong(0), c.getInt(1), c.getString(2).split(",").map { it.toInt() }, c.getString(3), c.getString(4) ?: "")) } }
+    fun myLotto(): List<MyLotto> = readableDatabase.rawQuery("SELECT id, round, nums, created, src, ticket FROM lotto_my ORDER BY round DESC, id ASC", null).use { c ->
+        buildList { while (c.moveToNext()) runCatching {
+            add(MyLotto(c.getLong(0), c.getInt(1), c.getString(2).split(",").map { it.toInt() }, c.getString(3), c.getString(4) ?: "", if (c.isNull(5)) "" else c.getString(5)))
+        } }
     }
+
+    fun deleteMyLottoGroup(round: Int, group: String) { myLotto().filter { it.round == round && it.group == group }.forEach { deleteMyLotto(it.id) } }
 
     fun deleteMyLotto(id: Long) { writableDatabase.delete("lotto_my", "id=?", arrayOf(id.toString())) }
+
+    // ───────── 여행 ─────────
+    private fun str(c: android.database.Cursor, n: String) = c.getColumnIndex(n).let { if (it < 0 || c.isNull(it)) "" else c.getString(it) }
+    private fun lng(c: android.database.Cursor, n: String) = c.getColumnIndex(n).let { if (it < 0 || c.isNull(it)) 0L else c.getLong(it) }
+    private fun dbl(c: android.database.Cursor, n: String) = c.getColumnIndex(n).let { if (it < 0 || c.isNull(it)) 0.0 else c.getDouble(it) }
+
+    fun saveTrip(t: Trip): Long {
+        val v = ContentValues().apply {
+            put("title", t.title); put("start", t.start.toString()); put("end_d", t.end?.toString() ?: ""); put("companions", t.companions)
+            put("rating", t.rating); put("fav", if (t.fav) 1 else 0); put("tags", t.tags.joinToString(",")); put("memo", t.memo)
+            put("active", if (t.active) 1 else 0); put("cover", t.cover)
+        }
+        return if (t.id > 0) { writableDatabase.update("trips", v, "id=?", arrayOf(t.id.toString())); t.id } else writableDatabase.insert("trips", null, v)
+    }
+
+    fun trips(): List<Trip> = readableDatabase.query("trips", null, null, null, null, null, "start DESC, id DESC").use { c ->
+        buildList { while (c.moveToNext()) runCatching {
+            add(Trip(lng(c, "id"), str(c, "title"), LocalDate.parse(str(c, "start")), str(c, "end_d").takeIf { it.isNotBlank() }?.let { LocalDate.parse(it) },
+                str(c, "companions"), dbl(c, "rating"), lng(c, "fav") == 1L, str(c, "tags").split(",").filter { it.isNotBlank() }, str(c, "memo"),
+                lng(c, "active") == 1L, str(c, "cover")))
+        } }
+    }
+
+    fun trip(id: Long): Trip? = trips().firstOrNull { it.id == id }
+    fun activeTrip(): Trip? = trips().firstOrNull { it.active }
+
+    fun deleteTrip(id: Long, filesDir: java.io.File) {
+        val a = arrayOf(id.toString())
+        writableDatabase.delete("spots", "trip=?", a); writableDatabase.delete("texp", "trip=?", a)
+        writableDatabase.delete("ttrack", "trip=?", a); writableDatabase.delete("trips", "id=?", a)
+        runCatching { java.io.File(filesDir, "travel/$id").deleteRecursively() }
+    }
+
+    fun saveSpot(s: Spot): Long {
+        val v = ContentValues().apply {
+            put("trip", s.tripId); put("kind", s.kind); put("name", s.name); put("ts", s.ts.withNano(0).toString()); put("lat", s.lat); put("lon", s.lon)
+            put("rating", s.rating); put("price", s.price); put("menu", s.menu); put("memo", s.memo); put("again", if (s.again) 1 else 0)
+            put("photos", JSONArray(s.photos).toString()); put("stay_type", s.stayType); put("nights", s.nights); put("booking", s.booking)
+            put("revisit", if (s.revisit) 1 else 0); put("transport", s.transport)
+        }
+        return if (s.id > 0) { writableDatabase.update("spots", v, "id=?", arrayOf(s.id.toString())); s.id } else writableDatabase.insert("spots", null, v)
+    }
+
+    fun spots(tripId: Long? = null): List<Spot> = readableDatabase.query("spots", null, if (tripId != null) "trip=?" else null,
+        tripId?.let { arrayOf(it.toString()) }, null, null, "ts ASC").use { c ->
+        buildList { while (c.moveToNext()) runCatching {
+            val ph = runCatching { JSONArray(str(c, "photos")).let { a -> (0 until a.length()).map { a.getString(it) } } }.getOrDefault(emptyList())
+            add(Spot(lng(c, "id"), lng(c, "trip"), str(c, "kind").ifBlank { SpotKind.PLACE }, str(c, "name"), LocalDateTime.parse(str(c, "ts")),
+                dbl(c, "lat"), dbl(c, "lon"), dbl(c, "rating"), lng(c, "price"), str(c, "menu"), str(c, "memo"), lng(c, "again") == 1L, ph,
+                str(c, "stay_type"), lng(c, "nights").toInt(), str(c, "booking"), lng(c, "revisit") == 1L, str(c, "transport")))
+        } }
+    }
+
+    fun deleteSpot(id: Long) { writableDatabase.delete("spots", "id=?", arrayOf(id.toString())) }
+
+    fun saveExpense(e: Expense): Long {
+        val v = ContentValues().apply {
+            put("trip", e.tripId); put("ts", e.ts.withNano(0).toString()); put("cat", e.category); put("amount", e.amount)
+            put("memo", e.memo); put("card_tx", e.cardTxId); put("method", e.method)
+        }
+        return if (e.id > 0) { writableDatabase.update("texp", v, "id=?", arrayOf(e.id.toString())); e.id } else writableDatabase.insert("texp", null, v)
+    }
+
+    fun expenses(tripId: Long? = null): List<Expense> = readableDatabase.query("texp", null, if (tripId != null) "trip=?" else null,
+        tripId?.let { arrayOf(it.toString()) }, null, null, "ts ASC").use { c ->
+        buildList { while (c.moveToNext()) runCatching {
+            add(Expense(lng(c, "id"), lng(c, "trip"), LocalDateTime.parse(str(c, "ts")), str(c, "cat").ifBlank { "기타" }, lng(c, "amount"),
+                str(c, "memo"), c.getColumnIndex("card_tx").let { i -> if (i < 0 || c.isNull(i)) -1 else c.getLong(i) }, str(c, "method").ifBlank { "현금" }))
+        } }
+    }
+
+    fun deleteExpense(id: Long) { writableDatabase.delete("texp", "id=?", arrayOf(id.toString())) }
+
+    fun addTrack(p: TrackPoint) {
+        writableDatabase.insert("ttrack", null, ContentValues().apply { put("trip", p.tripId); put("ts", p.ts.withNano(0).toString()); put("lat", p.lat); put("lon", p.lon) })
+    }
+
+    fun track(tripId: Long): List<TrackPoint> = readableDatabase.query("ttrack", null, "trip=?", arrayOf(tripId.toString()), null, null, "ts ASC").use { c ->
+        buildList { while (c.moveToNext()) runCatching { add(TrackPoint(tripId, LocalDateTime.parse(str(c, "ts")), dbl(c, "lat"), dbl(c, "lon"))) } }
+    }
+
+    /** 여행 중 자동 경로 간격(분, 0 = 끔) / 하루 정리 알림 / 1년 전 오늘 알림 */
+    var travelTrackMin: Int
+        get() = prefs.getInt("travelTrackMin", 30)
+        set(v) { prefs.edit().putInt("travelTrackMin", v).apply() }
+    var travelDailyNote: Boolean
+        get() = prefs.getBoolean("travelDaily", true)
+        set(v) { prefs.edit().putBoolean("travelDaily", v).apply() }
+    var travelMemory: Boolean
+        get() = prefs.getBoolean("travelMemory", true)
+        set(v) { prefs.edit().putBoolean("travelMemory", v).apply() }
 
     var lottoOptions: LottoOptions
         get() = runCatching { JSONObject(prefs.getString("lottoOpt", "{}")!!).let { o ->
@@ -441,6 +561,7 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
             put("lunchS", c.lunchStart); put("lunchE", c.lunchEnd); put("lunchDed", c.lunchOverDeduct)
             put("startOk", c.startConfirmed); put("bonusY", c.annualBonus); put("leavePay", c.unusedLeavePay)
             put("leaveDays", c.annualLeaveDays); put("leaveBasis", c.leaveBasis); put("leaveCarry", c.leaveCarryover)
+            put("places", JSONArray(c.places.map { JSONObject().put("n", it.name).put("la", it.lat).put("lo", it.lon) }))
         }
 
         fun companyFromJson(j: JSONObject): Company {
@@ -459,7 +580,9 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
                 j.optString("payAdj", d.payAdjust), j.optString("prorate", d.prorateBy), j.optBoolean("bonusPartial", d.bonusOnPartial),
                 j.optInt("leaveDays", d.annualLeaveDays), j.optString("leaveBasis", d.leaveBasis), j.optDouble("leaveCarry", d.leaveCarryover),
                 j.optString("lunchS", d.lunchStart), j.optString("lunchE", d.lunchEnd), j.optBoolean("lunchDed", d.lunchOverDeduct),
-                j.optBoolean("startOk", false), j.optInt("bonusY", 0), j.optInt("leavePay", 0))
+                j.optBoolean("startOk", false), j.optInt("bonusY", 0), j.optInt("leavePay", 0),
+                j.optJSONArray("places")?.let { a -> (0 until a.length()).mapNotNull { i -> a.optJSONObject(i)?.let { o ->
+                    WorkPlace(o.optString("n", "근무지"), o.optDouble("la", 0.0), o.optDouble("lo", 0.0)) } } } ?: emptyList())
         }
 
         fun settingsToJson(s: AppSettings) = JSONObject().apply {
@@ -492,5 +615,72 @@ class Repo private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "worklife.d
                 j.optInt("pollEnd", d.pollAfterEndMin), j.optBoolean("fastOn", d.fastLearnedWindow),
                 j.optInt("fastMin", d.fastIntervalMin), j.optInt("holPoll", d.holidayPollMin))
         }
+    }
+}
+
+/** 백업·복원·클라우드 동기화용: 표 전체를 JSON으로 (사진 파일은 따로) */
+object RepoDump {
+    val TABLES = listOf("days", "payslips", "cards", "lotto_draws", "lotto_my", "trips", "spots", "texp", "ttrack")
+
+    fun tableToJson(r: Repo, table: String): JSONArray = r.readableDatabase.rawQuery("SELECT * FROM $table", null).use { c ->
+        val a = JSONArray()
+        while (c.moveToNext()) {
+            val o = JSONObject()
+            for (i in 0 until c.columnCount) {
+                val n = c.getColumnName(i)
+                when (c.getType(i)) {
+                    android.database.Cursor.FIELD_TYPE_NULL -> o.put(n, JSONObject.NULL)
+                    android.database.Cursor.FIELD_TYPE_INTEGER -> o.put(n, c.getLong(i))
+                    android.database.Cursor.FIELD_TYPE_FLOAT -> o.put(n, c.getDouble(i))
+                    else -> o.put(n, c.getString(i))
+                }
+            }
+            a.put(o)
+        }
+        a
+    }
+
+    /** 표를 통째로 바꿔 넣기 (복원) */
+    fun jsonToTable(r: Repo, table: String, a: JSONArray) {
+        val db = r.writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete(table, null, null)
+            for (i in 0 until a.length()) {
+                val o = a.getJSONObject(i)
+                val v = ContentValues()
+                o.keys().forEach { k ->
+                    when (val x = o.get(k)) {
+                        JSONObject.NULL -> v.putNull(k)
+                        is Int -> v.put(k, x.toLong()); is Long -> v.put(k, x)
+                        is Double -> v.put(k, x); is Boolean -> v.put(k, if (x) 1 else 0)
+                        else -> v.put(k, x.toString())
+                    }
+                }
+                db.insertWithOnConflict(table, null, v, SQLiteDatabase.CONFLICT_REPLACE)
+            }
+            db.setTransactionSuccessful()
+        } finally { db.endTransaction() }
+    }
+
+    /** 설정(SharedPreferences) 전체 */
+    fun prefsToJson(ctx: Context): JSONObject {
+        val o = JSONObject()
+        ctx.getSharedPreferences("worklife", Context.MODE_PRIVATE).all.forEach { (k, v) ->
+            when (v) { is String -> o.put(k, "s:$v"); is Int -> o.put(k, "i:$v"); is Long -> o.put(k, "l:$v"); is Boolean -> o.put(k, "b:$v"); is Float -> o.put(k, "f:$v") }
+        }
+        return o
+    }
+
+    fun jsonToPrefs(ctx: Context, o: JSONObject) {
+        val e = ctx.getSharedPreferences("worklife", Context.MODE_PRIVATE).edit()
+        o.keys().forEach { k ->
+            val s = o.optString(k); val v = s.drop(2)
+            when (s.take(2)) {
+                "s:" -> e.putString(k, v); "i:" -> v.toIntOrNull()?.let { e.putInt(k, it) }; "l:" -> v.toLongOrNull()?.let { e.putLong(k, it) }
+                "b:" -> e.putBoolean(k, v == "true"); "f:" -> v.toFloatOrNull()?.let { e.putFloat(k, it) }
+            }
+        }
+        e.apply()
     }
 }

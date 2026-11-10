@@ -153,6 +153,8 @@ private fun LottoGenerate(latest: LottoDraw?, draws: List<LottoDraw>, goMine: ()
     var roll by remember { mutableIntStateOf(0) }
     var showOpt by remember { mutableStateOf(false) }
     var saved by remember { mutableStateOf(setOf<Int>()) }
+    // 한 번 뽑은 결과(5게임)를 저장하면 한 묶음으로
+    val batchKey = remember(roll) { "생성|" + java.time.LocalDateTime.now().withNano(0) }
     var msg by remember { mutableStateOf<String?>(null) }
     // 핫(최근 많이 나온 15개) · 콜드(적게 나온 15개)
     val hc = remember(draws, opt.statWindow) { Lotto.hotCold(draws, opt.statWindow) }
@@ -227,13 +229,13 @@ private fun LottoGenerate(latest: LottoDraw?, draws: List<LottoDraw>, goMine: ()
                 if (hc.first.isNotEmpty()) Text("🔥${g.count { it in hc.first }}🧊${g.count { it in hc.second }}", fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f))
                 TextButton(onClick = {
-                    repo.saveMyLotto(Lotto.nextRound(), listOf(g), "생성"); saved = saved + gi
+                    repo.saveMyLotto(Lotto.nextRound(), listOf(g), "생성", batchKey); saved = saved + gi
                 }, enabled = gi !in saved, contentPadding = PaddingValues(horizontal = 6.dp)) { Text(if (gi in saved) "✓" else "저장") }
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 6.dp)) {
             FilledTonalButton(onClick = {
-                repo.saveMyLotto(Lotto.nextRound(), result, "생성"); saved = result.indices.toSet(); msg = "제${Lotto.nextRound()}회 내 번호에 저장했어요"
+                repo.saveMyLotto(Lotto.nextRound(), result, "생성", batchKey); saved = result.indices.toSet(); msg = "제${Lotto.nextRound()}회 내 번호에 저장했어요"
             }, enabled = saved.size < result.size) { Text("모두 저장") }
             OutlinedButton(onClick = {
                 val text = "🎱 제${Lotto.nextRound()}회 추천 번호\n" + result.mapIndexed { i, g -> "${"ABCDE"[i]}  ${g.joinToString(" ") { "%2d".format(it) }}" }.joinToString("\n")
@@ -285,7 +287,13 @@ private fun LottoMine(draws: List<LottoDraw>, dataVer: Int, refresh: () -> Unit)
                 QrScan.scan(ctx, onText = { t ->
                     val q = Lotto.parseQr(t)
                     if (q == null) msg = "로또 용지 QR이 아니에요"
-                    else { repo.saveMyLotto(q.first, q.second, "QR"); ver++; msg = "제${q.first}회 ${q.second.size}게임을 추가했어요"; if (q.first !in byRound) refresh() }
+                    else {
+                        // 용지 1장 = 한 묶음 (같은 용지를 또 스캔하면 추가 안 함)
+                        val n = repo.saveMyLotto(q.first, q.second, "QR", "QR:" + t.trim())
+                        ver++
+                        msg = if (n == 0) "이미 추가한 용지예요 (제${q.first}회)" else "🎫 제${q.first}회 용지 1장 · ${n}게임을 추가했어요"
+                        if (q.first !in byRound) refresh()
+                    }
                 }, onFail = { msg = it })
             }, Modifier.weight(1f)) { Text("📷 용지 QR 스캔") }
             OutlinedButton(onClick = { manual = true }, Modifier.weight(1f)) { Text("✏️ 직접 입력") }
@@ -302,28 +310,56 @@ private fun LottoMine(draws: List<LottoDraw>, dataVer: Int, refresh: () -> Unit)
     mine.filter { !onlyBought || it.src != "생성" }.groupBy { it.round }.forEach { (round, list) ->
         val d = byRound[round]
         SCard(pad = 16.dp) {
-            val ranks = d?.let { dd -> list.map { Lotto.rank(it.nums, dd) } }
+            val allRanks = d?.let { dd -> list.map { Lotto.rank(it.nums, dd) } }
             CardTitle("제${round}회 · ${Lotto.dateOf(round).monthValue}/${Lotto.dateOf(round).dayOfMonth}", trailing = {
                 when {
-                    ranks == null && round > Lotto.latestRound() -> Tag("추첨 전", MaterialTheme.colorScheme.primary)
-                    ranks == null -> Tag("결과 받는 중", OtOrange)
-                    ranks.any { it in 1..5 } -> Tag("🎉 " + ranks.filter { it > 0 }.min().let { Lotto.rankLabel(it) } + " 당첨!", OkGreen)
+                    allRanks == null && round > Lotto.latestRound() -> Tag("추첨 전", MaterialTheme.colorScheme.primary)
+                    allRanks == null -> Tag("결과 받는 중", OtOrange)
+                    allRanks.any { it in 1..5 } -> Tag("🎉 " + allRanks.filter { it > 0 }.min().let { Lotto.rankLabel(it) } + " 당첨!", OkGreen)
                     else -> Tag("낙첨", MaterialTheme.colorScheme.onSurface.copy(alpha = .5f))
                 }
             })
-            list.forEachIndexed { i, m ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (m.src != "생성") "🎫" else "💭", fontSize = 13.sp, modifier = Modifier.width(22.dp))
-                    m.nums.forEach { n -> Ball(n, 28.dp, dim = d != null && n !in d.nums && n != d.bonus, ring = d != null && n == d.bonus); Spacer(Modifier.width(3.dp)) }
-                    Spacer(Modifier.weight(1f))
-                    ranks?.get(i)?.let { r -> Text(Lotto.rankLabel(r), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = if (r > 0) OkGreen else MaterialTheme.colorScheme.onSurface.copy(alpha = .45f)) }
-                    TextButton(onClick = { repo.deleteMyLotto(m.id); ver++ }, contentPadding = PaddingValues(horizontal = 4.dp)) { Text("✕", color = MaterialTheme.colorScheme.onSurface.copy(alpha = .4f)) }
+            // 용지(또는 저장 1번) 단위 묶음: 구매 용지 먼저, 그다음 생성해서 저장한 번호
+            val groups = list.groupBy { it.group }.entries.sortedWith(compareBy({ it.value.first().src == "생성" }, { it.value.first().id }))
+            var paper = 0
+            groups.forEach { (key, games) ->
+                val bought = games.first().src != "생성"
+                if (bought) paper++
+                var open by remember(key) { mutableStateOf(true) }
+                val ranks = d?.let { dd -> games.map { Lotto.rank(it.nums, dd) } }
+                val created = games.first().created.take(16).let { runCatching { java.time.LocalDateTime.parse(it) }.getOrNull() }
+                Row(Modifier.fillMaxWidth().clickable { open = !open }.padding(top = 10.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text((if (bought) "🎫 용지 $paper" else "💭 저장한 번호") + " · ${games.size}게임" +
+                        (created?.let { " · ${it.monthValue}/${it.dayOfMonth} " + if (games.first().src == "QR") "스캔" else if (bought) "입력" else "저장" } ?: ""),
+                        fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    ranks?.let { rs ->
+                        val win = rs.filter { it > 0 }.groupBy { it }.toSortedMap()
+                        Text(if (win.isEmpty()) "낙첨" else win.entries.joinToString(" ") { "${it.key}등×${it.value.size}" }, fontSize = 12.sp,
+                            color = if (win.isEmpty()) MaterialTheme.colorScheme.onSurface.copy(alpha = .45f) else OkGreen, fontWeight = FontWeight.SemiBold)
+                    }
+                    Text(if (open) " ▲" else " ▼", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f))
+                }
+                HorizontalDivider()
+                if (open) {
+                    games.forEachIndexed { i, m ->
+                        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("ABCDE".getOrElse(i) { ' ' }.toString(), fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f), modifier = Modifier.width(18.dp))
+                            m.nums.forEach { n -> Ball(n, 28.dp, dim = d != null && n !in d.nums && n != d.bonus, ring = d != null && n == d.bonus); Spacer(Modifier.width(3.dp)) }
+                            Spacer(Modifier.weight(1f))
+                            ranks?.get(i)?.let { r -> Text(Lotto.rankLabel(r), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = if (r > 0) OkGreen else MaterialTheme.colorScheme.onSurface.copy(alpha = .45f)) }
+                            TextButton(onClick = { repo.deleteMyLotto(m.id); ver++ }, contentPadding = PaddingValues(horizontal = 4.dp)) { Text("✕", color = MaterialTheme.colorScheme.onSurface.copy(alpha = .4f)) }
+                        }
+                    }
+                    TextButton(onClick = { repo.deleteMyLottoGroup(round, key); ver++ }, contentPadding = PaddingValues(0.dp)) {
+                        Text(if (bought) "이 용지 삭제" else "이 묶음 삭제", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f))
+                    }
                 }
             }
             if (d != null) Text("당첨 ${d.nums.joinToString(" ")} + ${d.bonus}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f))
         }
     }
-    if (manual) ManualLottoDialog(onDismiss = { manual = false }) { round, g -> repo.saveMyLotto(round, listOf(g), "직접"); ver++; manual = false }
+    if (manual) ManualLottoDialog(onDismiss = { manual = false }) { round, g -> repo.saveMyLotto(round, listOf(g), "직접", "직접|" + java.time.LocalDate.now()); ver++; manual = false }
 }
 
 @Composable
